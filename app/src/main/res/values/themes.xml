@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.HarmoniaMusicTV" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/bg_deep</item>
+        <item name="android:colorBackground">@color/bg_deep</item>
+        <item name="android:statusBarColor">@color/bg_deep</item>
+        <item name="android:navigationBarColor">@color/bg_deep</item>
+    </style>
+
+    <!-- 启动页：窗口创建即由系统绘制（带图标），首帧就绪后淡入内容，避免深色空白屏 -->
+    <style name="Theme.HarmoniaMusicTV.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/bg_deep</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.HarmoniaMusicTV</item>
+    </style>
+</resources>

@@ -1,0 +1,27 @@
+# ---- Gradle / IDE ----
+.gradle/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Android build artifacts
+**/build/
+*.apk
+*.aab
+*.dex
+*.class
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local machine config
+local.properties
+
+# 根目录调试残留快照（截图 / UI dump / logcat），保留 docs/ 下的素材
+/*.png
+/*.xml
+/*.txt
+
+# Logs
+*.log

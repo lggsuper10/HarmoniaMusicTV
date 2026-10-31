@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 单个八分音符，白色，居中 -->
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M25,72a15,12 0 1,0 30,0a15,12 0 1,0 -30,0z" />
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M55,72 L55,26 L60,26 L60,72 Z" />
+    <path
+        android:fillColor="#ffffff"
+        android:pathData="M55,26 C72,30 74,50 62,56 L59,49 C69,45 66,36 55,33 Z" />
+</vector>
