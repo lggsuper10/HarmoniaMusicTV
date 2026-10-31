@@ -80,22 +80,24 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
         withTimeoutOrNull(12_000) { initDeferredLocal.await() }
     }
 
-    /** 触发脚本 request 事件并 await 其 handler 的返回值（JSON 字符串）。 */
+    /** 触发脚本 request 事件并 await 其 handler 的返回值（JSON 字符串）。25s 超时防止脚本无响应时永久卡死。 */
     suspend fun callAction(requestInfo: Map<String, Any?>): String? {
         val reqId = reqCounter.incrementAndGet()
-        return suspendCancellableCoroutine { cont ->
-            pendingActions[reqId] = cont
-            cont.invokeOnCancellation { pendingActions.remove(reqId) }
-            mainHandler.post {
-                val wv = webView
-                if (wv == null) {
-                    pendingActions.remove(reqId)
-                    cont.resume(null)
-                    return@post
+        return withTimeoutOrNull(25_000) {
+            suspendCancellableCoroutine { cont ->
+                pendingActions[reqId] = cont
+                cont.invokeOnCancellation { pendingActions.remove(reqId) }
+                mainHandler.post {
+                    val wv = webView
+                    if (wv == null) {
+                        pendingActions.remove(reqId)
+                        cont.resume(null)
+                        return@post
+                    }
+                    val dataJson = JSONObject(requestInfo).toString()
+                    val js = "lx.__emitRequest($reqId, ${JSONObject.quote(dataJson)})"
+                    wv.evaluateJavascript(js, null)
                 }
-                val dataJson = JSONObject(requestInfo).toString()
-                val js = "lx.__emitRequest($reqId, ${JSONObject.quote(dataJson)})"
-                wv.evaluateJavascript(js, null)
             }
         }
     }

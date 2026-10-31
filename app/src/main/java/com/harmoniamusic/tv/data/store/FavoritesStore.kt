@@ -7,7 +7,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 本地收藏（我的歌单）。用 SharedPreferences 持久化，零额外依赖。
+ * 本地收藏（我喜欢的音乐）。用 SharedPreferences 持久化，零额外依赖。
  * 收藏项不含 qualities，播放时由对应音源重新取流。
  */
 class FavoritesStore(context: Context) {
@@ -41,6 +41,22 @@ class FavoritesStore(context: Context) {
             save(list)
         }
     }
+
+    /** 用重新扫描或在线匹配得到的封面刷新收藏项。 */
+    fun updateArtwork(items: List<MusicItem>) {
+        val artwork = items.filter { !it.img.isNullOrBlank() }
+            .associateBy { "${it.source}|${it.songmid}" }
+        if (artwork.isEmpty()) return
+        val current = get()
+        val updated = current.map { existing ->
+            val cover = artwork["${existing.source}|${existing.songmid}"]?.img
+            if (existing.img.isNullOrBlank() && !cover.isNullOrBlank()) existing.copy(img = cover)
+            else existing
+        }
+        if (updated != current) save(updated)
+    }
+
+    fun updateArtwork(item: MusicItem) = updateArtwork(listOf(item))
 
     fun remove(item: MusicItem) {
         save(get().filterNot { it.source == item.source && it.songmid == item.songmid })

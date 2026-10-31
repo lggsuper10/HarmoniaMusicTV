@@ -13,6 +13,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,7 +41,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,6 +71,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -79,7 +87,9 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.harmoniamusic.tv.data.lan.LanImportServer
+import com.harmoniamusic.tv.data.source.LOCAL_SOURCE
 import com.harmoniamusic.tv.data.source.MusicItem
+import com.harmoniamusic.tv.data.source.MusicQuality
 import com.harmoniamusic.tv.data.source.MusicSources
 import com.harmoniamusic.tv.data.source.PlaylistInfo
 import com.harmoniamusic.tv.data.store.SourceStore
@@ -95,6 +105,7 @@ import com.harmoniamusic.tv.data.update.UpdateInfo
 import kotlinx.coroutines.launch
 import com.harmoniamusic.tv.ui.shell.TvTab
 import com.harmoniamusic.tv.ui.state.DownloadViewModel
+import com.harmoniamusic.tv.ui.state.LyricLoadState
 import com.harmoniamusic.tv.ui.state.PlayerViewModel
 import com.harmoniamusic.tv.ui.strings.TvText
 import com.harmoniamusic.tv.ui.theme.LocalTvColors
@@ -138,15 +149,18 @@ fun HomeScreen(
     LaunchedEffect(Unit) { vm.loadRecommendPlaylists() }
 
     if (detailTitle.isNotBlank()) {
-        PlaylistDetailPane(
-            title = detailTitle,
-            meta = detailMeta,
-            cover = detailCover,
-            songs = detailSongs,
-            loading = detailLoading,
+        CollectionDetailPane(
+            state = CollectionDetailUiState(
+                title = detailTitle,
+                meta = detailMeta,
+                cover = detailCover,
+                songs = detailSongs,
+                loading = detailLoading,
+            ),
             onBack = { vm.closePlaylist() },
-            onPlay = { index -> vm.playList(detailSongs, index) },
-            onAddToQueue = { vm.addListToQueue(detailSongs) },
+            onPlay = { index -> vm.playList(detailSongs, index, detailTitle) },
+            onShuffle = { vm.playShuffled(detailSongs, detailTitle) },
+            onAddToQueue = { vm.addToQueue(detailSongs, detailTitle) },
         )
         return
     }
@@ -196,7 +210,7 @@ fun HomeScreen(
                         HomeIconPill(Icons.Rounded.Search, "搜索") { onOpenSearch() }
                     }
                 }
-                HomeCover(url = item.img, size = tv.tvSize(220))
+                HomeCover(url = item.img, size = tv.tvSize(220), corner = 20)
             }
         }
 
@@ -326,12 +340,12 @@ private fun PlayingBars(color: Color) {
     }
 }
 
-/** 封面图；无图时给占位块。 */
+/** 封面图；无图时给占位块。corner 为圆角当量（tvSize 单位），可按位置单独加大弧角。 */
 @Composable
-private fun HomeCover(url: String?, size: Dp) {
+private fun HomeCover(url: String?, size: Dp, corner: Int = 12) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    val shape = RoundedCornerShape(tv.tvSize(12))
+    val shape = RoundedCornerShape(tv.tvSize(corner))
     if (!url.isNullOrBlank()) {
         AsyncImage(
             model = url,
@@ -341,10 +355,22 @@ private fun HomeCover(url: String?, size: Dp) {
         )
     } else {
         Box(
-            modifier = Modifier.size(size).background(colors.surfaceHigh, shape),
+            modifier = Modifier
+                .size(size)
+                .background(
+                    Brush.linearGradient(
+                        listOf(colors.surfaceHigh, colors.bgWarm, colors.primarySoft),
+                    ),
+                    shape,
+                ),
             contentAlignment = Alignment.Center,
         ) {
-            Text("♪", color = colors.dimText, fontSize = tv.tvFont(28))
+            Icon(
+                imageVector = Icons.Rounded.MusicNote,
+                contentDescription = null,
+                tint = colors.subtext.copy(alpha = 0.8f),
+                modifier = Modifier.size(tv.tvSize(34)),
+            )
         }
     }
 }
@@ -391,24 +417,34 @@ private fun HomePlaylistCard(p: PlaylistInfo, onClick: () -> Unit) {
     }
 }
 
-/** 歌单详情：左侧封面与操作，右侧带序号的歌曲列表（对齐 TV 参考稿）。 */
+/** 详情页共享的只读展示模型：推荐歌单、收藏和本地文件夹复用它。 */
+private data class CollectionDetailUiState(
+    val title: String,
+    val meta: String,
+    val cover: String?,
+    val songs: List<MusicItem>,
+    val loading: Boolean = false,
+)
+
+/** 集合详情：左侧封面与操作，右侧带序号的歌曲列表。 */
 @Composable
-private fun PlaylistDetailPane(
-    title: String,
-    meta: String,
-    cover: String?,
-    songs: List<MusicItem>,
-    loading: Boolean,
+private fun CollectionDetailPane(
+    state: CollectionDetailUiState,
     onBack: () -> Unit,
     onPlay: (Int) -> Unit,
+    onShuffle: (() -> Unit)? = null,
     onAddToQueue: () -> Unit,
+    onRemoveTrack: ((MusicItem) -> Unit)? = null,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val context = LocalContext.current
     val playAllRequester = remember { FocusRequester() }
+    val songs = state.songs
 
-    LaunchedEffect(title) {
+    BackHandler { onBack() }
+
+    LaunchedEffect(state.title) {
         withFrameNanos { }
         withFrameNanos { }
         runCatching { playAllRequester.requestFocus() }
@@ -422,12 +458,12 @@ private fun PlaylistDetailPane(
         Column(
             modifier = Modifier.width(tv.tvSize(430)).fillMaxHeight(),
         ) {
-            HomePill("返回") { onBack() }
+            HomePill(TvText.back) { onBack() }
             Spacer(Modifier.height(tv.tvSize(20)))
-            HomeCover(url = cover, size = tv.tvSize(300))
+            HomeCover(url = state.cover, size = tv.tvSize(300))
             Spacer(Modifier.height(tv.tvSize(18)))
             Text(
-                text = meta,
+                text = state.meta,
                 color = colors.dimText,
                 fontSize = tv.tvFont(18),
                 maxLines = 1,
@@ -435,7 +471,7 @@ private fun PlaylistDetailPane(
             )
             Spacer(Modifier.height(tv.tvSize(8)))
             Text(
-                text = title,
+                text = state.title,
                 color = colors.text,
                 fontSize = tv.tvFont(38),
                 fontWeight = FontWeight.Bold,
@@ -445,14 +481,21 @@ private fun PlaylistDetailPane(
             Spacer(Modifier.height(tv.tvSize(22)))
             Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
                 HomePill(
-                    label = "播放全部",
+                    label = TvText.playAll,
                     modifier = Modifier.focusRequester(playAllRequester),
                 ) {
                     if (songs.isNotEmpty()) onPlay(0)
                 }
-                HomePill("加入播放列表") {
-                    onAddToQueue()
-                    Toast.makeText(context, "已加入播放列表", Toast.LENGTH_SHORT).show()
+                if (onShuffle != null) {
+                    HomePill(TvText.random) {
+                        if (songs.isNotEmpty()) onShuffle()
+                    }
+                }
+                HomePill(TvText.addToQueue) {
+                    if (songs.isNotEmpty()) {
+                        onAddToQueue()
+                        Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
@@ -476,19 +519,19 @@ private fun PlaylistDetailPane(
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    text = if (loading) "加载中…" else "已加载 ${songs.size} 首",
+                    text = if (state.loading) "加载中…" else "已加载 ${songs.size} 首",
                     color = colors.dimText,
                     fontSize = tv.tvFont(18),
                 )
             }
             Spacer(Modifier.height(tv.tvSize(8)))
             Text(
-                text = "OK 播放整张歌单 · 点击歌曲立即播放",
+                text = "OK 播放整个集合 · 点击歌曲从该曲开始",
                 color = colors.dimText,
                 fontSize = tv.tvFont(17),
             )
             Spacer(Modifier.height(tv.tvSize(10)))
-            if (loading && songs.isEmpty()) {
+            if (state.loading && songs.isEmpty()) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth(),
                     color = colors.selectGreen,
@@ -502,7 +545,21 @@ private fun PlaylistDetailPane(
                     verticalArrangement = Arrangement.spacedBy(tv.tvSize(4)),
                 ) {
                     itemsIndexed(songs) { index, song ->
-                        DetailSongRow(index, song) { onPlay(index) }
+                        if (onRemoveTrack == null) {
+                            DetailSongRow(index, song) { onPlay(index) }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                DetailSongRow(
+                                    index = index,
+                                    item = song,
+                                    modifier = Modifier.weight(1f),
+                                ) { onPlay(index) }
+                                Spacer(Modifier.width(tv.tvSize(10)))
+                                SettingActionButton(TvText.removeFromFavorites) {
+                                    onRemoveTrack(song)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -510,7 +567,7 @@ private fun PlaylistDetailPane(
     }
 }
 
-/** 歌单/本地文件夹详情中的歌曲行：序号、歌名、歌手与时长。 */
+/** 集合详情中的歌曲行：序号、歌名、歌手与时长。 */
 @Composable
 private fun DetailSongRow(
     index: Int,
@@ -616,6 +673,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     val pos by vm.positionMs.collectAsState()
     val dur by vm.durationMs.collectAsState()
     val lyric by vm.lyric.collectAsState()
+    val lyricState by vm.lyricState.collectAsState()
     val error by vm.playbackError.collectAsState()
     val mode by vm.playMode.collectAsState()
     val favorites by vm.favorites.collectAsState()
@@ -624,6 +682,28 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     val toastContext = LocalContext.current
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     val controlsToggleRequester = remember { FocusRequester() }
+    var downloadQualityItem by remember { mutableStateOf<MusicItem?>(null) }
+    var downloadQualityOptions by remember { mutableStateOf<List<MusicQuality>>(emptyList()) }
+
+    fun requestDownload(item: MusicItem?) {
+        if (item == null) {
+            Toast.makeText(toastContext, TvText.chooseSongFirst, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (item.source == LOCAL_SOURCE) {
+            Toast.makeText(toastContext, TvText.downloadLocalSkip, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val options = downloadQualitiesFor(item)
+        when (options.size) {
+            0 -> downloadVm.download(item, "128k")
+            1 -> downloadVm.download(item, options.first().type)
+            else -> {
+                downloadQualityItem = item
+                downloadQualityOptions = options
+            }
+        }
+    }
 
     LaunchedEffect(downloadMessage) {
         val msg = downloadMessage ?: return@LaunchedEffect
@@ -703,9 +783,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 Spacer(Modifier.width(tv.tvSize(20)))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(horizontalAlignment = Alignment.End) {
-                        val streamSourceName = vm.userApiList()
-                            .firstOrNull { it.active }?.name
-                            ?: MusicSources.displayName(current?.source ?: "")
+                        val streamSourceName = if (current?.source == LOCAL_SOURCE) {
+                            "本地文件"
+                        } else {
+                            vm.userApiList().firstOrNull { it.active }?.name
+                                ?: MusicSources.displayName(current?.source ?: "")
+                        }
                         Text(
                             streamSourceName,
                             color = colors.dimText,
@@ -732,6 +815,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 LyricsView(
                     raw = lyric,
                     positionMs = pos,
+                    loadState = lyricState,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
             }
@@ -750,22 +834,171 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                     horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    ControlButton(TvText.controlPrev) { vm.prev() }
-                    ControlButton(
-                        if (isPlaying) TvText.pause else TvText.playNow,
-                        Modifier.focusRequester(playRequester),
+                    ControlIconButton(
+                        icon = Icons.Rounded.SkipPrevious,
+                        contentDescription = TvText.controlPrev,
+                    ) { vm.prev() }
+                    ControlIconButton(
+                        icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = if (isPlaying) TvText.pause else TvText.playNow,
+                        modifier = Modifier.focusRequester(playRequester),
+                        primary = true,
                     ) {
                         vm.togglePlay()
                     }
-                    ControlButton(TvText.controlNext) { vm.next() }
+                    ControlIconButton(
+                        icon = Icons.Rounded.SkipNext,
+                        contentDescription = TvText.controlNext,
+                    ) { vm.next() }
+                    Spacer(Modifier.width(tv.tvSize(10)))
                     ControlButton(playModeLabel(mode)) { vm.cyclePlayMode() }
                     ControlButton(if (isFav) "♥ 已喜欢" else "♡ 喜欢") {
                         current?.let { vm.toggleFavorite(it) }
                     }
-                    ControlButton(TvText.download) { current?.let { downloadVm.download(it) } }
+                    ControlButton(TvText.download) { requestDownload(current) }
                     ControlButton(TvText.back) { onBack() }
                 }
             }
+        }
+        downloadQualityItem?.let { item ->
+            DownloadQualityDialog(
+                item = item,
+                qualities = downloadQualityOptions,
+                onDismiss = {
+                    downloadQualityItem = null
+                    downloadQualityOptions = emptyList()
+                },
+                onSelect = { quality ->
+                    downloadVm.download(item, quality.type)
+                    downloadQualityItem = null
+                    downloadQualityOptions = emptyList()
+                },
+            )
+        }
+    }
+}
+
+private val downloadQualityOrder = listOf("flac24bit", "flac", "320k", "128k")
+
+private fun downloadQualitiesFor(item: MusicItem): List<MusicQuality> =
+    item.qualities
+        .filter { it.type.isNotBlank() }
+        .distinctBy { it.type }
+        .sortedBy { quality ->
+            downloadQualityOrder.indexOf(quality.type).let { if (it < 0) Int.MAX_VALUE else it }
+        }
+
+private fun downloadQualityLabel(type: String): String = when (type) {
+    "flac24bit" -> TvText.downloadQuality24bit
+    "flac" -> TvText.downloadQualityFlac
+    "320k" -> TvText.downloadQuality320k
+    "128k" -> TvText.downloadQuality128k
+    else -> type
+}
+
+@Composable
+private fun DownloadQualityDialog(
+    item: MusicItem,
+    qualities: List<MusicQuality>,
+    onDismiss: () -> Unit,
+    onSelect: (MusicQuality) -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(18))
+    val firstRequester = remember { FocusRequester() }
+
+    LaunchedEffect(item.songmid, qualities) {
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching { firstRequester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(560))
+                    .background(colors.bgWarm, shape)
+                    .border(2.dp, colors.focus, shape)
+                    .padding(tv.tvSize(30)),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+            ) {
+                Text(
+                    text = TvText.selectDownloadQuality,
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "${item.name} · ${item.singer.ifBlank { TvText.unknownSinger }}",
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(18),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(tv.tvSize(8)))
+                qualities.forEachIndexed { index, quality ->
+                    DownloadQualityChoice(
+                        label = downloadQualityLabel(quality.type),
+                        detail = quality.size?.takeIf { it.isNotBlank() },
+                        focusRequester = if (index == 0) firstRequester else null,
+                        onClick = { onSelect(quality) },
+                    )
+                }
+                Spacer(Modifier.height(tv.tvSize(4)))
+                DownloadQualityChoice(
+                    label = TvText.cancelAction,
+                    onClick = onDismiss,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadQualityChoice(
+    label: String,
+    detail: String? = null,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(10))
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .let { if (focusRequester != null) it.focusRequester(focusRequester) else it }
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(if (focused) colors.selectGreen else colors.surface, shape)
+            .border(
+                width = if (focused) 3.dp else 1.dp,
+                color = if (focused) colors.focus else colors.border,
+                shape = shape,
+            )
+            .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(13)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = if (focused) colors.bgDeep else colors.text,
+            fontSize = tv.tvFont(20),
+            fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+            modifier = Modifier.weight(1f),
+        )
+        detail?.let {
+            Text(
+                text = it,
+                color = if (focused) colors.bgDeep else colors.dimText,
+                fontSize = tv.tvFont(16),
+            )
         }
     }
 }
@@ -938,12 +1171,14 @@ fun formatTime(ms: Long): String {
 // ---- 其余 Tab ----
 /** 排行榜 Tab：左榜单列表 + 右曲目，点击播放。 */
 @Composable
-fun HistoryScreen(vm: PlayerViewModel = viewModel()) {
+fun ChartsScreen(vm: PlayerViewModel = viewModel()) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
+    val context = LocalContext.current
     val boards by vm.boards.collectAsState()
     val boardList by vm.boardList.collectAsState()
     var selectedBangid by remember { mutableStateOf<String?>(null) }
+    val selectedBoardName = boards.firstOrNull { it.bangid == selectedBangid }?.name ?: TvText.ranking
 
     LaunchedEffect(Unit) { vm.loadBoards() }
     LaunchedEffect(boards) {
@@ -993,34 +1228,88 @@ fun HistoryScreen(vm: PlayerViewModel = viewModel()) {
             }
         }
         Spacer(Modifier.width(tv.tvSize(24)))
-        LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
-        ) {
-            items(boardList) { item ->
-                SongRow(item = item) { vm.play(item) }
+        Column(Modifier.weight(1f).fillMaxHeight()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+            ) {
+                Text(
+                    text = selectedBoardName,
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${boardList.size}${TvText.dot}${TvText.songs}",
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(18),
+                )
+                HomePill(TvText.playAll) {
+                    if (boardList.isNotEmpty()) vm.playList(boardList, 0, selectedBoardName)
+                }
+                HomePill(TvText.random) {
+                    if (boardList.isNotEmpty()) vm.playShuffled(boardList, selectedBoardName)
+                }
+                HomePill(TvText.addToQueue) {
+                    if (boardList.isNotEmpty()) {
+                        vm.addToQueue(boardList, selectedBoardName)
+                        Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            Spacer(Modifier.height(tv.tvSize(12)))
+            if (boardList.isEmpty()) {
+                Text(TvText.noMusic, color = colors.dimText, fontSize = tv.tvFont(20))
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(4)),
+                ) {
+                    itemsIndexed(boardList) { index, item ->
+                        DetailSongRow(index, item) {
+                            vm.playList(boardList, index, selectedBoardName)
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-/** 我的歌单 Tab：本地目录导入 + 收藏列表。 */
+/** 我的音乐 Tab：收藏集合 + 本地文件夹。播放队列不在这里。 */
 @Composable
 fun MyListScreen(vm: PlayerViewModel = viewModel()) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val favorites by vm.favorites.collectAsState()
-    val current by vm.current.collectAsState()
     val localFolders by vm.localFolders.collectAsState()
+    val recent by vm.recent.collectAsState()
+    val current by vm.current.collectAsState()
 
-    val addLocalRequester = remember { FocusRequester() }
+    val favoritesRequester = remember { FocusRequester() }
     val context = LocalContext.current
     var showPicker by remember { mutableStateOf(false) }
     var openFolder by remember { mutableStateOf<LocalFolder?>(null) }
+    var showFavorites by rememberSaveable { mutableStateOf(false) }
+    var actionFolder by remember { mutableStateOf<LocalFolder?>(null) }
+    var removeFolder by remember { mutableStateOf<LocalFolder?>(null) }
+    var showManager by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         vm.loadFavorites()
         vm.loadLocal()
+        vm.loadRecent()
+    }
+    LaunchedEffect(showFavorites, openFolder, favorites.size, localFolders.size) {
+        if (!showFavorites && openFolder == null) {
+            withFrameNanos { }
+            withFrameNanos { }
+            runCatching { favoritesRequester.requestFocus() }
+        }
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -1029,101 +1318,122 @@ fun MyListScreen(vm: PlayerViewModel = viewModel()) {
         if (granted) showPicker = true
     }
 
-    openFolder?.let { folder ->
-        LocalFolderDetailPane(
-            folder = folder,
-            onBack = { openFolder = null },
-            onPlay = { index -> vm.playList(folder.songs, index) },
+    if (showFavorites) {
+        CollectionDetailPane(
+            state = CollectionDetailUiState(
+                title = TvText.favorites,
+                meta = "${favorites.size} 首 · 收藏歌曲",
+                cover = favorites.firstOrNull()?.img,
+                songs = favorites,
+            ),
+            onBack = { showFavorites = false },
+            onPlay = { index -> vm.playList(favorites, index, TvText.favorites) },
+            onShuffle = { vm.playShuffled(favorites, TvText.favorites) },
             onAddToQueue = {
-                vm.addListToQueue(folder.songs)
-                Toast.makeText(
-                    context,
-                    "已将 ${folder.name} 加入播放列表（${folder.songs.size} 首）",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                if (favorites.isNotEmpty()) {
+                    vm.addToQueue(favorites, TvText.favorites)
+                    Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onRemoveTrack = { vm.removeFavorite(it) },
+        )
+        return
+    }
+
+    openFolder?.let { folder ->
+        CollectionDetailPane(
+            state = CollectionDetailUiState(
+                title = folder.name,
+                meta = "${folder.songs.size} 首 · 本地文件夹",
+                cover = folder.songs.firstOrNull()?.img,
+                songs = folder.songs,
+            ),
+            onBack = { openFolder = null },
+            onPlay = { index -> vm.playList(folder.songs, index, folder.name) },
+            onShuffle = { vm.playShuffled(folder.songs, folder.name) },
+            onAddToQueue = {
+                if (folder.songs.isNotEmpty()) {
+                    vm.addToQueue(folder.songs, folder.name)
+                    Toast.makeText(
+                        context,
+                        "已将 ${folder.name} 加入播放队列（${folder.songs.size} 首）",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             },
         )
         return
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(tv.tvSize(68)),
-        verticalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(12)),
+        verticalArrangement = Arrangement.spacedBy(tv.tvSize(7)),
     ) {
-        item { Text(TvText.library, color = colors.text, fontSize = tv.tvFont(32)) }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(16))) {
-                LocalEntryCard(TvText.addLocalSongDisk, Modifier.focusRequester(addLocalRequester)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = TvText.library,
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "${favorites.size} 首收藏 · ${localFolders.size} 个文件夹",
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(15),
+                )
+                Spacer(Modifier.width(tv.tvSize(16)))
+                HomePill(TvText.manage) { showManager = true }
+            }
+        }
+        item {
+            LibraryCollectionRail(
+                favorites = favorites,
+                folders = localFolders,
+                favoritesModifier = Modifier.focusRequester(favoritesRequester),
+                onOpenFavorites = { showFavorites = true },
+                onOpenFolder = { openFolder = it },
+                onManageFolder = { actionFolder = it },
+                onAddFolder = {
                     if (hasStoragePermission(context)) {
                         showPicker = true
                     } else {
                         permissionLauncher.launch(storagePermission())
                     }
-                }
-                LocalEntryCard(TvText.importSonglist) { /* TODO: 手机扫码 / 粘贴链接导入歌单 */ }
-            }
+                },
+            )
         }
-        if (localFolders.isNotEmpty()) {
+        if (recent.isNotEmpty()) {
             item {
-                Text("本地歌单", color = colors.text, fontSize = tv.tvFont(24), fontWeight = FontWeight.Bold)
-            }
-            items(localFolders, key = { it.uri }) { folder ->
-                LocalFolderRow(
-                    folder = folder,
-                    onOpen = { openFolder = folder },
-                    onAddToQueue = {
-                        vm.addListToQueue(folder.songs)
-                        Toast.makeText(
-                            context,
-                            "已将 ${folder.name} 加入播放列表（${folder.songs.size} 首）",
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                    },
-                    onRemove = { vm.removeLocalFolder(folder.uri) },
-                )
-            }
-            item {
-                Text(
-                    "点击文件夹进入本地歌单，可直接播放或加入播放列表",
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(17),
-                )
-            }
-        }
-        item {
-            Text("收藏歌曲", color = colors.text, fontSize = tv.tvFont(24), fontWeight = FontWeight.Bold)
-        }
-        current?.let { cur ->
-            item {
-                var f by remember { mutableStateOf(false) }
-                Box(
-                    modifier = Modifier
-                        .onFocusChanged { f = it.isFocused }
-                        .clickable { vm.addFavorite(cur) }
-                        .background(colors.selectGreen, RoundedCornerShape(tv.tvSize(10)))
-                        .border(
-                            width = if (f) 3.dp else 0.dp,
-                            color = colors.focus,
-                            shape = RoundedCornerShape(tv.tvSize(10)),
-                        )
-                        .padding(horizontal = tv.tvSize(24), vertical = tv.tvSize(10)),
-                    contentAlignment = Alignment.Center,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("收藏当前歌曲", color = Color.White, fontSize = tv.tvFont(18))
+                    Text(
+                        text = TvText.recentPlayed,
+                        color = colors.text,
+                        fontSize = tv.tvFont(22),
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text = "OK 从该曲开始播放",
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(14),
+                    )
                 }
             }
-        }
-        item {
-            if (favorites.isEmpty()) {
-                Text("暂无收藏歌曲", color = colors.dimText, fontSize = tv.tvFont(22))
-            }
-        }
-        items(favorites) { item ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    SongRow(item = item) { vm.play(item) }
-                }
-                SettingActionButton("删除") { vm.removeFavorite(item) }
+            item {
+                RecentTrackRail(
+                    recent = recent,
+                    current = current,
+                ) { index -> vm.playList(recent, index, TvText.recentPlayed) }
             }
         }
     }
@@ -1137,192 +1447,564 @@ fun MyListScreen(vm: PlayerViewModel = viewModel()) {
             },
         )
     }
-}
 
-/** 本地目录入口卡（虚线风格占位框）。 */
-@Composable
-private fun LocalEntryCard(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var f by remember { mutableStateOf(false) }
-    Box(
-        modifier = modifier
-            .onFocusChanged { f = it.isFocused }
-            .clickable { onClick() }
-            .background(colors.surface, RoundedCornerShape(tv.tvSize(10)))
-            .border(
-                width = if (f) 3.dp else 2.dp,
-                color = if (f) colors.focus else colors.subtext,
-                shape = RoundedCornerShape(tv.tvSize(10)),
-            )
-            .padding(tv.tvSize(28)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = colors.subtext, fontSize = tv.tvFont(20))
+    if (showManager) {
+        LibraryManagerDialog(
+            folders = localFolders,
+            onDismiss = { showManager = false },
+            onRescan = {
+                vm.loadLocal()
+                Toast.makeText(context, "正在重新扫描本地文件夹", Toast.LENGTH_SHORT).show()
+            },
+            onRemoveRequest = { folder ->
+                showManager = false
+                removeFolder = folder
+            },
+        )
+    }
+
+    actionFolder?.let { folder ->
+        FolderActionDialog(
+            folder = folder,
+            onDismiss = { actionFolder = null },
+            onOpen = {
+                actionFolder = null
+                openFolder = folder
+            },
+            onAddToQueue = {
+                actionFolder = null
+                if (folder.songs.isNotEmpty()) {
+                    vm.addToQueue(folder.songs, folder.name)
+                    Toast.makeText(
+                        context,
+                        "已将 ${folder.name} 加入播放队列（${folder.songs.size} 首）",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
+            onRescan = {
+                actionFolder = null
+                vm.loadLocal()
+                Toast.makeText(context, "正在重新扫描本地文件夹", Toast.LENGTH_SHORT).show()
+            },
+            onRemoveRequest = {
+                actionFolder = null
+                removeFolder = folder
+            },
+        )
+    }
+
+    removeFolder?.let { folder ->
+        RemoveFolderConfirmDialog(
+            folderName = folder.name,
+            onCancel = { removeFolder = null },
+            onConfirm = {
+                vm.removeLocalFolder(folder.uri)
+                removeFolder = null
+                Toast.makeText(context, "已移除文件夹：${folder.name}", Toast.LENGTH_SHORT).show()
+            },
+        )
     }
 }
 
-/** 本地文件夹歌单行：打开、加入播放列表、移除。 */
 @Composable
-private fun LocalFolderRow(
-    folder: LocalFolder,
-    onOpen: () -> Unit,
-    onAddToQueue: () -> Unit,
-    onRemove: () -> Unit,
+private fun LibraryCollectionRail(
+    favorites: List<MusicItem>,
+    folders: List<LocalFolder>,
+    favoritesModifier: Modifier,
+    onOpenFavorites: () -> Unit,
+    onOpenFolder: (LocalFolder) -> Unit,
+    onManageFolder: (LocalFolder) -> Unit,
+    onAddFolder: () -> Unit,
+) {
+    val tv = LocalTvMetrics.current
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().height(tv.tvSize(216)),
+        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+    ) {
+        item {
+            FavoriteCollectionCard(
+                count = favorites.size,
+                cover = favorites.firstOrNull()?.img,
+                modifier = favoritesModifier,
+                onClick = onOpenFavorites,
+            )
+        }
+        items(folders, key = { it.uri }) { folder ->
+            LocalFolderCard(
+                folder = folder,
+                onOpen = { onOpenFolder(folder) },
+                onManage = { onManageFolder(folder) },
+            )
+        }
+        item { AddFolderCard(onClick = onAddFolder) }
+    }
+}
+
+/** 收藏集合与本地文件夹使用同一种卡片，避免收藏被误认为独立页面。 */
+@Composable
+private fun FavoriteCollectionCard(
+    count: Int,
+    cover: String?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     var focused by remember { mutableStateOf(false) }
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
+    Column(
+        modifier = modifier
+            .width(tv.tvSize(166))
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(
+                if (focused) colors.surfaceHigh else colors.surface,
+                RoundedCornerShape(tv.tvSize(12)),
+            )
+            .border(
+                width = if (focused) 3.dp else 0.dp,
+                color = colors.focus,
+                shape = RoundedCornerShape(tv.tvSize(12)),
+            )
+            .padding(tv.tvSize(8)),
     ) {
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .onFocusChanged { focused = it.isFocused }
-                .clickable { onOpen() }
-                .background(
-                    if (focused) colors.surfaceHigh else colors.surface,
-                    RoundedCornerShape(tv.tvSize(12)),
-                )
-                .border(
-                    width = if (focused) 3.dp else 0.dp,
-                    color = colors.focus,
-                    shape = RoundedCornerShape(tv.tvSize(12)),
-                )
-                .padding(tv.tvSize(14)),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            HomeCover(url = folder.songs.firstOrNull()?.img, size = tv.tvSize(92))
-            Spacer(Modifier.width(tv.tvSize(18)))
-            Column {
-                Text(
-                    text = folder.name,
-                    color = colors.text,
-                    fontSize = tv.tvFont(24),
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(tv.tvSize(5)))
-                Text(
-                    text = "${folder.songs.size} 首本地歌曲 · 点击进入歌单",
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(17),
-                )
+        Box {
+            HomeCover(url = cover, size = tv.tvSize(146), corner = 10)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(tv.tvSize(8))
+                    .background(Color.Black.copy(alpha = 0.58f), CircleShape)
+                    .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(4)),
+            ) {
+                Text("\u2665", color = colors.selectGreen, fontSize = tv.tvFont(15))
             }
         }
-        Spacer(Modifier.width(tv.tvSize(12)))
-        SettingActionButton("加入播放列表") { onAddToQueue() }
-        Spacer(Modifier.width(tv.tvSize(10)))
-        SettingActionButton("移除") { onRemove() }
+        Spacer(Modifier.height(tv.tvSize(6)))
+        Text(
+            text = TvText.favorites,
+            color = colors.text,
+            fontSize = tv.tvFont(18),
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = if (count > 0) "$count 首 · 收藏" else "暂无收藏",
+            color = colors.dimText,
+            fontSize = tv.tvFont(14),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
-/** 本地文件夹歌单详情：左侧歌曲列表，右侧当前聚焦歌曲的海报信息。 */
 @Composable
-private fun LocalFolderDetailPane(
-    folder: LocalFolder,
-    onBack: () -> Unit,
+private fun RecentTrackRail(
+    recent: List<MusicItem>,
+    current: MusicItem?,
     onPlay: (Int) -> Unit,
-    onAddToQueue: () -> Unit,
+) {
+    val tv = LocalTvMetrics.current
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().height(tv.tvSize(188)),
+        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+    ) {
+        itemsIndexed(recent, key = { _, item -> "${item.source}:${item.songmid}" }) { index, item ->
+            val isCurrent = current?.source == item.source && current.songmid == item.songmid
+            RecentTrackCard(item = item, isCurrent = isCurrent) { onPlay(index) }
+        }
+    }
+}
+
+@Composable
+private fun RecentTrackCard(item: MusicItem, isCurrent: Boolean, onClick: () -> Unit) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .width(tv.tvSize(150))
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(
+                if (focused) colors.surfaceHigh else colors.surface,
+                RoundedCornerShape(tv.tvSize(12)),
+            )
+            .border(
+                width = when {
+                    focused -> 3.dp
+                    isCurrent -> 2.dp
+                    else -> 0.dp
+                },
+                color = if (focused) colors.focus else colors.selectGreen,
+                shape = RoundedCornerShape(tv.tvSize(12)),
+            )
+            .padding(tv.tvSize(8)),
+    ) {
+        HomeCover(url = item.img, size = tv.tvSize(118), corner = 10)
+        Spacer(Modifier.height(tv.tvSize(6)))
+        Text(
+            text = item.name,
+            color = if (isCurrent) colors.selectGreen else colors.text,
+            fontSize = tv.tvFont(17),
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = item.singer.ifBlank { TvText.unknownSinger },
+            color = colors.dimText,
+            fontSize = tv.tvFont(14),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LocalFolderCard(
+    folder: LocalFolder,
+    onOpen: () -> Unit,
+    onManage: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    val context = LocalContext.current
-    var selectedIndex by remember(folder.uri) { mutableStateOf(0) }
-    val selected = folder.songs.getOrNull(selectedIndex)
-    val firstSongRequester = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .width(tv.tvSize(166))
+            .onFocusChanged { focused = it.isFocused }
+            .combinedClickable(onClick = onOpen, onLongClick = onManage)
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp && event.key == Key.Menu) {
+                    onManage()
+                    true
+                } else {
+                    false
+                }
+            }
+            .background(
+                if (focused) colors.surfaceHigh else colors.surface,
+                RoundedCornerShape(tv.tvSize(12)),
+            )
+            .border(
+                width = if (focused) 3.dp else 0.dp,
+                color = colors.focus,
+                shape = RoundedCornerShape(tv.tvSize(12)),
+            )
+            .padding(tv.tvSize(8)),
+    ) {
+        HomeCover(url = folder.songs.firstOrNull()?.img, size = tv.tvSize(146), corner = 10)
+        Spacer(Modifier.height(tv.tvSize(6)))
+        Text(
+            text = folder.name,
+            color = colors.text,
+            fontSize = tv.tvFont(18),
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = "${folder.songs.size} 首 · MENU 管理",
+            color = colors.dimText,
+            fontSize = tv.tvFont(14),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
 
-    BackHandler { onBack() }
+@Composable
+private fun AddFolderCard(onClick: () -> Unit) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .width(tv.tvSize(166))
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(
+                if (focused) colors.surfaceHigh else colors.surface,
+                RoundedCornerShape(tv.tvSize(12)),
+            )
+            .border(
+                width = if (focused) 3.dp else 2.dp,
+                color = if (focused) colors.focus else colors.border,
+                shape = RoundedCornerShape(tv.tvSize(12)),
+            )
+            .padding(tv.tvSize(8)),
+    ) {
+        Box(
+            modifier = Modifier.size(tv.tvSize(146)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "+",
+                color = if (focused) colors.selectGreen else colors.dimText,
+                fontSize = tv.tvFont(54),
+            )
+        }
+        Spacer(Modifier.height(tv.tvSize(6)))
+        Text(
+            text = TvText.addLocalSongDisk,
+            color = if (focused) Color.White else colors.text,
+            fontSize = tv.tvFont(18),
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = "电视或 U 盘目录",
+            color = colors.dimText,
+            fontSize = tv.tvFont(14),
+        )
+    }
+}
+
+@Composable
+private fun LibraryManagerDialog(
+    folders: List<LocalFolder>,
+    onDismiss: () -> Unit,
+    onRescan: () -> Unit,
+    onRemoveRequest: (LocalFolder) -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val firstRescanRequester = remember { FocusRequester() }
+    val closeRequester = remember { FocusRequester() }
+
+    LaunchedEffect(folders.size) {
+        withFrameNanos { }
+        withFrameNanos { }
+        val requester = if (folders.isEmpty()) closeRequester else firstRescanRequester
+        runCatching { requester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(760))
+                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(16)))
+                    .border(2.dp, colors.focus, RoundedCornerShape(tv.tvSize(16)))
+                    .padding(tv.tvSize(34)),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = TvText.manageLocalMusic,
+                        color = colors.text,
+                        fontSize = tv.tvFont(30),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "${folders.size} 个文件夹",
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(16),
+                    )
+                }
+                Text(
+                    text = TvText.manageLocalMusicHint,
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(16),
+                )
+                Spacer(Modifier.height(tv.tvSize(2)))
+
+                if (folders.isEmpty()) {
+                    Text(
+                        text = TvText.manageEmptyFolders,
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(18),
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(tv.tvSize(82 * folders.size.coerceIn(1, 3))),
+                        verticalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
+                    ) {
+                        itemsIndexed(folders, key = { _, folder -> folder.uri }) { index, folder ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(colors.surface, RoundedCornerShape(tv.tvSize(10)))
+                                    .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(12)),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        text = folder.name,
+                                        color = colors.text,
+                                        fontSize = tv.tvFont(20),
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = "${folder.songs.size} 首",
+                                        color = colors.dimText,
+                                        fontSize = tv.tvFont(15),
+                                    )
+                                }
+                                HomePill(
+                                    label = TvText.rescanFolder,
+                                    modifier = if (index == 0) {
+                                        Modifier.focusRequester(firstRescanRequester)
+                                    } else {
+                                        Modifier
+                                    },
+                                ) { onRescan() }
+                                Spacer(Modifier.width(tv.tvSize(10)))
+                                HomePill(TvText.removeFolder) { onRemoveRequest(folder) }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(tv.tvSize(4)))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    HomePill(
+                        label = TvText.closeAction,
+                        modifier = Modifier.focusRequester(closeRequester),
+                    ) { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderActionDialog(
+    folder: LocalFolder,
+    onDismiss: () -> Unit,
+    onOpen: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onRescan: () -> Unit,
+    onRemoveRequest: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val firstRequester = remember { FocusRequester() }
+
     LaunchedEffect(folder.uri) {
         withFrameNanos { }
         withFrameNanos { }
-        runCatching { firstSongRequester.requestFocus() }
+        runCatching { firstRequester.requestFocus() }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(24)),
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            contentAlignment = Alignment.Center,
         ) {
-            HomePill("返回") { onBack() }
-            Text(
-                text = folder.name,
-                color = colors.text,
-                fontSize = tv.tvFont(32),
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text("${folder.songs.size} 首", color = colors.dimText, fontSize = tv.tvFont(18))
-            HomePill("播放全部") { if (folder.songs.isNotEmpty()) onPlay(0) }
-            HomePill("加入播放列表") {
-                onAddToQueue()
-                Toast.makeText(
-                    context,
-                    "已将 ${folder.name} 加入播放列表（${folder.songs.size} 首）",
-                    Toast.LENGTH_SHORT,
-                ).show()
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(560))
+                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(16)))
+                    .border(2.dp, colors.focus, RoundedCornerShape(tv.tvSize(16)))
+                    .padding(tv.tvSize(34)),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
+            ) {
+                Text(
+                    text = TvText.folderActionTitle,
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = folder.name,
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(20),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${folder.songs.size} 首本地歌曲",
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(16),
+                )
+                Spacer(Modifier.height(tv.tvSize(4)))
+                HomePill("打开", Modifier.fillMaxWidth().focusRequester(firstRequester)) {
+                    onOpen()
+                }
+                HomePill(TvText.addToQueue, Modifier.fillMaxWidth()) { onAddToQueue() }
+                HomePill(TvText.rescanFolder, Modifier.fillMaxWidth()) { onRescan() }
+                HomePill(TvText.removeFolder, Modifier.fillMaxWidth()) { onRemoveRequest() }
+                HomePill(TvText.cancelAction, Modifier.fillMaxWidth()) { onDismiss() }
             }
         }
-        Spacer(Modifier.height(tv.tvSize(18)))
-        if (folder.songs.isEmpty()) {
-            Text("此文件夹内没有音乐文件", color = colors.dimText, fontSize = tv.tvFont(20))
-        } else {
-            Row(Modifier.weight(1f).fillMaxWidth()) {
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(5)),
-                ) {
-                    itemsIndexed(folder.songs) { index, song ->
-                        DetailSongRow(
-                            index = index,
-                            item = song,
-                            modifier = if (index == 0) Modifier.focusRequester(firstSongRequester) else Modifier,
-                            onFocused = { selectedIndex = index },
-                        ) { onPlay(index) }
-                    }
-                }
-                Spacer(Modifier.width(tv.tvSize(48)))
-                Column(
-                    modifier = Modifier.width(tv.tvSize(390)).fillMaxHeight(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    HomeCover(url = selected?.img, size = tv.tvSize(360))
-                    Spacer(Modifier.height(tv.tvSize(22)))
-                    Text(
-                        text = selected?.name ?: TvText.unknownSong,
-                        color = colors.text,
-                        fontSize = tv.tvFont(28),
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(tv.tvSize(8)))
-                    Text(
-                        text = selected?.singer ?: TvText.unknownSinger,
-                        color = colors.subtext,
-                        fontSize = tv.tvFont(20),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (!selected?.albumName.isNullOrBlank()) {
-                        Spacer(Modifier.height(tv.tvSize(4)))
-                        Text(
-                            text = selected?.albumName.orEmpty(),
-                            color = colors.dimText,
-                            fontSize = tv.tvFont(18),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+    }
+}
+
+@Composable
+private fun RemoveFolderConfirmDialog(
+    folderName: String,
+    onCancel: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val cancelRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching { cancelRequester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(640))
+                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(16)))
+                    .border(2.dp, colors.focus, RoundedCornerShape(tv.tvSize(16)))
+                    .padding(tv.tvSize(40)),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "移除「$folderName」？",
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(tv.tvSize(14)))
+                Text(
+                    text = TvText.removeFolderConfirm,
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(19),
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(tv.tvSize(30)))
+                Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(18))) {
+                    HomePill(TvText.cancelAction, Modifier.focusRequester(cancelRequester)) { onCancel() }
+                    HomePill(TvText.removeFolder) { onConfirm() }
                 }
             }
         }
@@ -1375,7 +2057,7 @@ private fun LocalDirPicker(
         if (audioCount >= 0) {
             Text(
                 text = if (audioCount > 0) {
-                    "此文件夹共 $audioCount 首音乐（含子文件夹），按「导入此文件夹」添加"
+                    "此文件夹共 $audioCount 首音乐（含子文件夹），按「添加此文件夹」添加"
                 } else {
                     "此文件夹内没有音乐文件"
                 },
@@ -1414,7 +2096,7 @@ private fun LocalDirPicker(
         Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(16))) {
             SettingActionButton("取消") { onDismiss() }
             opened?.let { dir ->
-                SettingActionButton("导入此文件夹") { onConfirm(dir) }
+                SettingActionButton(TvText.importThisFolder) { onConfirm(dir) }
             }
         }
     }
@@ -1492,6 +2174,11 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
     var userApiCards by remember { mutableStateOf(vm.userApiList()) }
     fun refreshUserApis() {
         userApiCards = vm.userApiList()
+        activeUserApi = userApiPrefs.getActive()
+    }
+    // 进入设置页时确保脚本已加载：init 只在播放/测试取流时触发，直接进设置页会因未加载而看不到导入源
+    LaunchedEffect(Unit) {
+        userApiCards = vm.ensureUserApiLoaded()
         activeUserApi = userApiPrefs.getActive()
     }
     val activeSource by vm.activeSource.collectAsState()
@@ -2145,7 +2832,7 @@ fun SearchScreen(vm: PlayerViewModel = viewModel()) {
                     verticalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
                 ) {
                     itemsIndexed(results) { index, item ->
-                        SongRow(item = item) { vm.playList(results, index) }
+                        SongRow(item = item) { vm.playList(results, index, TvText.searchResult) }
                     }
                     if (pageInfo.page < pageInfo.maxPage) {
                         item {
@@ -2283,67 +2970,383 @@ private fun SearchKeyButton(
     }
 }
 
-/** 播放列表 Tab：展示当前队列，点击切歌，可清空。 */
+/** Playlist tab: focusable queue on the left, selected track artwork on the right. */
 @Composable
 fun QueueScreen(vm: PlayerViewModel = viewModel()) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val list by vm.queueList.collectAsState()
     val curIndex by vm.queueIndex.collectAsState()
-    Column(Modifier.fillMaxSize().padding(tv.tvSize(68))) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(tv.tvSize(20)),
-        ) {
-            Text(TvText.playlist, color = colors.text, fontSize = tv.tvFont(32))
-            var f by remember { mutableStateOf(false) }
-            Box(
-                modifier = Modifier
-                    .onFocusChanged { f = it.isFocused }
-                    .clickable { vm.clearQueue() }
-                    .background(colors.surface, RoundedCornerShape(tv.tvSize(8)))
-                    .border(
-                        width = if (f) 3.dp else 0.dp,
-                        color = colors.focus,
-                        shape = RoundedCornerShape(tv.tvSize(8)),
+    val source by vm.queueSource.collectAsState()
+    val isPlaying by vm.isPlaying.collectAsState()
+    var previewIndex by remember(list) {
+        mutableStateOf(
+            when {
+                list.isEmpty() -> -1
+                curIndex in list.indices -> curIndex
+                else -> 0
+            },
+        )
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(24)),
+        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(48)),
+    ) {
+        Column(Modifier.weight(1.12f).fillMaxHeight()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(18)),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = TvText.playlist,
+                        color = colors.text,
+                        fontSize = tv.tvFont(38),
+                        fontWeight = FontWeight.Bold,
                     )
-                    .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(10)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(TvText.clearList, color = colors.subtext, fontSize = tv.tvFont(18))
+                    Spacer(Modifier.height(tv.tvSize(6)))
+                    Text(
+                        text = buildString {
+                            append(list.size)
+                            append(TvText.dot)
+                            append(TvText.songs)
+                            source?.takeIf { it.isNotBlank() }?.let {
+                                append(TvText.dot)
+                                append(TvText.queueSourcePrefix)
+                                append(it)
+                            }
+                        },
+                        color = colors.primary,
+                        fontSize = tv.tvFont(17),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(tv.tvSize(4)))
+                    Text(
+                        text = TvText.queueExplain,
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(16),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (list.isNotEmpty()) {
+                    HomePill(TvText.clearList) { vm.clearQueue() }
+                }
             }
-        }
-        Spacer(Modifier.height(tv.tvSize(16)))
-        if (list.isEmpty()) {
-            Text(TvText.noMusic, color = colors.dimText, fontSize = tv.tvFont(22))
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
-            ) {
-                itemsIndexed(list) { i, item ->
-                    val isCur = i == curIndex
-                    var f by remember { mutableStateOf(false) }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .onFocusChanged { f = it.isFocused }
-                            .clickable { vm.playQueueAt(i) }
-                            .background(
-                                if (isCur) colors.surfaceHigh else if (f) colors.surface else Color.Transparent,
-                                RoundedCornerShape(tv.tvSize(8)),
-                            )
-                            .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(12)),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+            Spacer(Modifier.height(tv.tvSize(18)))
+            if (list.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .background(colors.surface, RoundedCornerShape(tv.tvSize(16)))
+                        .padding(tv.tvSize(28)),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Column {
+                        Text(TvText.noMusic, color = colors.text, fontSize = tv.tvFont(28))
+                        Spacer(Modifier.height(tv.tvSize(8)))
                         Text(
-                            text = "${if (isCur) "▶ " else ""}${item.name} - ${item.singer.ifBlank { TvText.unknownSinger }}",
-                            color = if (isCur) colors.selectGreen else if (f) colors.text else colors.subtext,
-                            fontSize = tv.tvFont(22),
+                            text = TvText.emptyQueueHint,
+                            color = colors.dimText,
+                            fontSize = tv.tvFont(18),
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
+                ) {
+                    itemsIndexed(list) { index, item ->
+                        QueueTrackRow(
+                            index = index,
+                            item = item,
+                            isCurrent = index == curIndex,
+                            isSelected = index == previewIndex,
+                            isPlaying = isPlaying,
+                            onFocused = { previewIndex = index },
+                            onClick = { vm.playQueueAt(index) },
                         )
                     }
                 }
             }
+        }
+
+        QueuePosterPane(
+            item = list.getOrNull(previewIndex),
+            index = previewIndex,
+            total = list.size,
+            isCurrent = previewIndex >= 0 && previewIndex == curIndex,
+            isPlaying = isPlaying,
+            modifier = Modifier.weight(0.88f).fillMaxHeight(),
+        )
+    }
+}
+
+@Composable
+private fun QueueTrackRow(
+    index: Int,
+    item: MusicItem,
+    isCurrent: Boolean,
+    isSelected: Boolean,
+    isPlaying: Boolean,
+    onFocused: () -> Unit,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(10))
+    val background = when {
+        focused -> colors.surfaceHigh
+        isCurrent -> colors.primarySoft
+        isSelected -> colors.surface
+        else -> Color.Transparent
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) onFocused()
+            }
+            .clickable { onClick() }
+            .background(background, shape)
+            .border(
+                width = when {
+                    focused -> 3.dp
+                    isSelected -> 1.dp
+                    else -> 0.dp
+                },
+                color = if (focused) colors.focus else colors.border,
+                shape = shape,
+            )
+            .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(10)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.width(tv.tvSize(42)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isCurrent && isPlaying) {
+                PlayingBars(color = colors.selectGreen)
+            } else {
+                Text(
+                    text = "%02d".format(index + 1),
+                    color = if (isCurrent) colors.selectGreen else colors.dimText,
+                    fontSize = tv.tvFont(17),
+                )
+            }
+        }
+        Spacer(Modifier.width(tv.tvSize(10)))
+        HomeCover(url = item.img, size = tv.tvSize(46))
+        Spacer(Modifier.width(tv.tvSize(12)))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = item.name,
+                color = when {
+                    focused -> Color.White
+                    isCurrent -> colors.selectGreen
+                    else -> colors.text
+                },
+                fontSize = tv.tvFont(20),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(tv.tvSize(3)))
+            Text(
+                text = item.singer.ifBlank { TvText.unknownSinger },
+                color = colors.subtext,
+                fontSize = tv.tvFont(16),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (item.interval.isNotBlank()) {
+            Spacer(Modifier.width(tv.tvSize(10)))
+            Text(
+                text = item.interval,
+                color = colors.dimText,
+                fontSize = tv.tvFont(16),
+            )
+        }
+    }
+}
+
+@Composable
+private fun QueuePosterPane(
+    item: MusicItem?,
+    index: Int,
+    total: Int,
+    isCurrent: Boolean,
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(20))
+
+    BoxWithConstraints(
+        modifier = modifier
+            .background(
+                Brush.verticalGradient(listOf(colors.bgWarm, colors.bgDeep)),
+                shape,
+            )
+            .border(1.dp, colors.border, shape)
+            .padding(tv.tvSize(26)),
+    ) {
+        if (item == null) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text("\u266A", color = colors.dimText, fontSize = tv.tvFont(64))
+                Spacer(Modifier.height(tv.tvSize(18)))
+                Text(
+                    text = TvText.noMusic,
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(tv.tvSize(10)))
+                Text(
+                    text = TvText.emptyQueueHint,
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(17),
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        } else {
+            val compact = maxHeight < tv.tvSize(460)
+            val posterSize = minOf(
+                maxWidth * 0.88f,
+                maxHeight * if (compact) 0.54f else 0.50f,
+            )
+            val stateLabel = when {
+                isCurrent && isPlaying -> TvText.nowPlaying
+                isCurrent -> TvText.paused
+                else -> TvText.selected
+            }
+            val stateColor = when {
+                isCurrent && isPlaying -> colors.selectGreen
+                isCurrent -> colors.warn
+                else -> colors.primary
+            }
+
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = stateLabel,
+                        color = stateColor,
+                        fontSize = tv.tvFont(16),
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text = "${index + 1}${TvText.dot}$total",
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(16),
+                    )
+                }
+                Spacer(Modifier.height(tv.tvSize(14)))
+                QueuePosterCover(url = item.img, size = posterSize)
+                Spacer(Modifier.height(tv.tvSize(18)))
+                Text(
+                    text = item.name,
+                    color = colors.text,
+                    fontSize = tv.tvFont(30),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(tv.tvSize(6)))
+                Text(
+                    text = item.singer.ifBlank { TvText.unknownSinger },
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(20),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!compact) {
+                    Spacer(Modifier.height(tv.tvSize(4)))
+                    Text(
+                        text = item.albumName.ifBlank { TvText.unknownAlbum },
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(17),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(tv.tvSize(12)))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = MusicSources.displayName(item.source),
+                            color = colors.primary,
+                            fontSize = tv.tvFont(16),
+                        )
+                        Spacer(Modifier.weight(1f))
+                        if (item.interval.isNotBlank()) {
+                            Text(
+                                text = item.interval,
+                                color = colors.dimText,
+                                fontSize = tv.tvFont(16),
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (!compact) {
+                    Text(
+                        text = TvText.selectedSongHint,
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(15),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueuePosterCover(url: String?, size: Dp) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(14))
+    Box(
+        modifier = Modifier
+            .size(size)
+            .background(colors.surface, shape)
+            .border(1.dp, colors.border, shape)
+            .clip(shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!url.isNullOrBlank()) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text("\u266A", color = colors.dimText, fontSize = tv.tvFont(54))
         }
     }
 }

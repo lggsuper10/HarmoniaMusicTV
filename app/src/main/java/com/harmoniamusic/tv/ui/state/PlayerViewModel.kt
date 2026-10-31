@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.harmoniamusic.tv.data.local.LocalMediaResolver
 import com.harmoniamusic.tv.data.queue.PlayQueue
 import com.harmoniamusic.tv.data.repository.MusicRepository
 import com.harmoniamusic.tv.data.source.userapi.UserApiManager
@@ -13,6 +14,7 @@ import com.harmoniamusic.tv.data.source.MusicItem
 import com.harmoniamusic.tv.data.source.PlaylistInfo
 import com.harmoniamusic.tv.data.source.SearchResult
 import com.harmoniamusic.tv.data.store.FavoritesStore
+import com.harmoniamusic.tv.data.store.RecentStore
 import com.harmoniamusic.tv.data.store.SourceStore
 import com.harmoniamusic.tv.data.source.MusicSources
 import com.harmoniamusic.tv.player.TvMediaPlayer
@@ -27,6 +29,9 @@ import com.harmoniamusic.tv.data.source.LOCAL_SOURCE
 import com.harmoniamusic.tv.data.source.scanLocalDir
 import java.io.File
 import org.json.JSONObject
+import kotlin.random.Random
+
+enum class LyricLoadState { IDLE, LOADING, FOUND, EMPTY }
 
 /**
  * 播放与搜索的 UI 状态持有者（对应 RN 的全局播放内核 + store）。
@@ -38,7 +43,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = MusicRepository(player, userApi)
 
     private val queue = PlayQueue()
+    private val mediaResolver = LocalMediaResolver(app)
     private val favoritesStore = FavoritesStore(getApplication())
+    private val recentStore = RecentStore(getApplication())
     private val localFoldersStore = LocalFoldersStore(getApplication())
     private val sourceStore = SourceStore(getApplication())
 
@@ -122,6 +129,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /** 用户 API 脚本清单（含支持源/启用/选中状态），供设置页管理。 */
     fun userApiList(): List<UserApiManager.ApiInfo> = userApi.listApis()
 
+    /** 确保脚本已加载并返回最新清单（设置页进入时调用，否则导入项可能尚未加载、列表缺失）。 */
+    suspend fun ensureUserApiLoaded(): List<UserApiManager.ApiInfo> {
+        runCatching { userApi.init() }
+        return userApiList()
+    }
+
     fun setActiveUserApi(id: String) = userApi.setActive(id)
     fun setUserApiEnabled(id: String, on: Boolean) = userApi.setEnabled(id, on)
     fun removeImportedUserApi(idx: Int) {
@@ -149,6 +162,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _lyric = MutableStateFlow("")
     val lyric = _lyric.asStateFlow()
 
+    private val _lyricState = MutableStateFlow(LyricLoadState.IDLE)
+    val lyricState = _lyricState.asStateFlow()
+
+    private var playToken = 0
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
 
@@ -160,6 +178,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _favorites = MutableStateFlow<List<MusicItem>>(emptyList())
     val favorites = _favorites.asStateFlow()
+
+    private val _recent = MutableStateFlow(recentStore.get())
+    val recent = _recent.asStateFlow()
+
+    fun loadRecent() {
+        _recent.value = recentStore.get()
+    }
 
     private val _localFolders = MutableStateFlow<List<LocalFolder>>(emptyList())
     val localFolders = _localFolders.asStateFlow()
@@ -194,13 +219,35 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 val songs = runCatching { scanLocalDir(getApplication(), File(path)) }
                     .getOrDefault(emptyList())
                     .sortedBy { it.name }
-                LocalFolder(path, File(path).name.ifBlank { path }, songs)
+                LocalFolder(
+                    uri = path,
+                    name = File(path).name.ifBlank { path },
+                    songs = songs,
+                    cover = songs.firstOrNull { !it.img.isNullOrBlank() }?.img,
+                )
             }
             val songs = folders.flatMap { it.songs }
                 .distinctBy { it.songmid }
                 .sortedBy { it.name }
             _localFolders.value = folders
             _localSongs.value = songs
+
+            // 扫描结果通常比历史记录/收藏更完整，顺便用新读到的内嵌封面回填旧卡片。
+            recentStore.updateArtwork(songs)
+            favoritesStore.updateArtwork(songs)
+            _recent.value = recentStore.get()
+            _favorites.value = favoritesStore.get()
+
+            // 没有内嵌/同目录封面的文件夹，用第一首歌做一次受控的在线封面匹配。
+            folders.filter { it.cover.isNullOrBlank() && it.songs.isNotEmpty() }.forEach { folder ->
+                val cover = runCatching { mediaResolver.resolveFolderCover(folder.songs) }
+                    .getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: return@forEach
+                _localFolders.value = _localFolders.value.map {
+                    if (it.uri == folder.uri) it.copy(cover = cover) else it
+                }
+            }
         }
     }
 
@@ -221,6 +268,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _queueIndex = MutableStateFlow(-1)
     val queueIndex = _queueIndex.asStateFlow()
+
+    /** 当前播放队列的来源集合名；队列本身仍是运行时状态，不落盘成歌单。 */
+    private val _queueSource = MutableStateFlow<String?>(null)
+    val queueSource = _queueSource.asStateFlow()
 
     fun search(keyword: String) {
         if (keyword.isBlank()) return
@@ -420,16 +471,29 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 播放单首（队列仅含这一首）。 */
-    fun play(item: MusicItem) {
+    fun play(item: MusicItem, sourceTitle: String? = null) {
         queue.setAll(listOf(item), 0)
+        _queueSource.value = sourceTitle
         syncQueue()
         launchPlay(item)
     }
 
-    /** 播放一整列，从 startIndex 开始。 */
-    fun playList(items: List<MusicItem>, startIndex: Int = 0) {
+    /** 播放一个集合，从 startIndex 开始，并记录队列来源。 */
+    fun playList(items: List<MusicItem>, startIndex: Int = 0, sourceTitle: String? = null) {
         if (items.isEmpty()) return
         queue.setAll(items, startIndex)
+        _queueSource.value = sourceTitle
+        syncQueue()
+        queue.current?.let { launchPlay(it) }
+    }
+
+    /** 随机播放一个集合；队列仍保存集合全部歌曲，播放模式切到随机。 */
+    fun playShuffled(items: List<MusicItem>, sourceTitle: String? = null) {
+        if (items.isEmpty()) return
+        _playMode.value = PlayQueue.Mode.SHUFFLE
+        queue.mode = PlayQueue.Mode.SHUFFLE
+        queue.setAll(items, Random.nextInt(items.size))
+        _queueSource.value = sourceTitle
         syncQueue()
         queue.current?.let { launchPlay(it) }
     }
@@ -444,29 +508,33 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removeFromQueue(i: Int) {
         queue.removeAt(i)
+        if (queue.isEmpty) _queueSource.value = null
         syncQueue()
     }
 
     fun clearQueue() {
         queue.clear()
+        _queueSource.value = null
         syncQueue()
     }
 
-    /** 把一整个本地文件夹追加到播放列表，不打断当前正在播放的歌曲。 */
-    fun addListToQueue(items: List<MusicItem>) {
+    /** 把歌曲追加到播放队列尾部，不打断当前正在播放的歌曲，也不改变当前项。 */
+    fun addToQueue(items: List<MusicItem>, sourceTitle: String? = null) {
         if (items.isEmpty()) return
-        val existing = queue.list
-        val startIndex = queue.index.coerceAtLeast(0)
-        queue.setAll(existing + items, startIndex)
+        val wasEmpty = queue.isEmpty
+        queue.append(items)
+        if (wasEmpty && sourceTitle != null) _queueSource.value = sourceTitle
         syncQueue()
     }
 
     fun next(auto: Boolean = false) {
         queue.next(auto)?.let { launchPlay(it) }
+        syncQueue()
     }
 
     fun prev() {
         queue.prev()?.let { launchPlay(it) }
+        syncQueue()
     }
 
     /** 曲终自动连播（受播放模式约束：单曲循环回到当前曲）。 */
@@ -494,9 +562,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun launchPlay(item: MusicItem) {
+        val token = ++playToken
         _current.value = item
+        recentStore.add(item)
+        _recent.value = recentStore.get()
         saveLastPlay(item)
         _lyric.value = ""
+        _lyricState.value = LyricLoadState.LOADING
         _playbackError.value = false
         // 通知 Shell 打开播放页，保证点歌有可见反馈（无论是否真正播放成功）
         _openPlayerSignal.value += 1
@@ -515,16 +587,47 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
             }
         }
+        loadLyricAsync(item, token)
+        if (item.source == LOCAL_SOURCE) resolveLocalArtworkAsync(item, token)
+    }
+
+    private fun loadLyricAsync(item: MusicItem, token: Int) {
         viewModelScope.launch {
-            if (item.source != LOCAL_SOURCE) {
-                runCatching { repo.getLyric(item.source, item.songmid) }
-                    .onSuccess { _lyric.value = it ?: "" }
+            val text = if (item.source == LOCAL_SOURCE) {
+                runCatching { mediaResolver.resolveLyric(item) }.getOrNull()
+            } else {
+                runCatching { repo.getLyric(item.source, item.songmid) }.getOrNull()
+            }
+            if (token != playToken) return@launch
+            _lyric.value = text.orEmpty()
+            _lyricState.value = if (text.isNullOrBlank()) {
+                LyricLoadState.EMPTY
+            } else {
+                LyricLoadState.FOUND
             }
         }
     }
 
+    private fun resolveLocalArtworkAsync(item: MusicItem, token: Int) {
+        viewModelScope.launch {
+            val cover = runCatching { mediaResolver.resolveCover(item) }.getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?: return@launch
+            if (token != playToken) return@launch
+            val updated = item.copy(img = cover)
+            _current.value = updated
+            queue.update(updated)
+            syncQueue()
+            recentStore.updateArtwork(updated)
+            favoritesStore.updateArtwork(updated)
+            _recent.value = recentStore.get()
+            _favorites.value = favoritesStore.get()
+            saveLastPlay(updated)
+        }
+    }
+
     private fun syncQueue() {
-        _queueList.value = queue.list
+        _queueList.value = queue.list.toList()
         _queueIndex.value = queue.index
     }
 
@@ -589,4 +692,5 @@ data class LocalFolder(
     val uri: String,
     val name: String,
     val songs: List<MusicItem> = emptyList(),
+    val cover: String? = null,
 )

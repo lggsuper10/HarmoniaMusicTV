@@ -1,6 +1,7 @@
 package com.harmoniamusic.tv.data.source.userapi
 
 import android.content.Context
+import android.util.Log
 import com.harmoniamusic.tv.data.net.HttpClient
 import com.harmoniamusic.tv.data.source.MusicItem
 import com.harmoniamusic.tv.data.store.UserApiPrefs
@@ -74,11 +75,30 @@ class UserApiManager(private val context: Context) {
     /** 所有脚本支持（上报）的音源 id 合并去重，如 [wy, tx, kw, kg, mg]。 */
     fun supportedSources(): List<String> = apis.values.flatMap { it.sourceIds }.distinct()
 
-    /** 导入内容可能是脚本链接（http/https）：下载真实脚本文本；否则原样返回。 */
+    /**
+     * 导入内容可能是脚本链接（http/https）：下载真实脚本文本；否则原样返回。
+     * 电视直连 GitHub 代理镜像时常因 TLS 被墙而失败，故对 GitHub raw 链接自动补多个
+     * 镜像候选（gh-proxy.com / ghfast.top）依次尝试，失败时打日志便于排查。
+     */
     private suspend fun resolveScriptContent(content: String): String {
         val t = content.trim()
         if (!t.startsWith("http://", true) && !t.startsWith("https://", true)) return content
-        return runCatching { HttpClient.getRaw(t) }.getOrDefault(content)
+        val candidates = buildList {
+            add(t)
+            Regex("""^(https?://)[^/]+(/raw\.githubusercontent\.com/.+)$""", RegexOption.IGNORE_CASE)
+                .find(t)?.let { m ->
+                    add("https://gh-proxy.com" + m.groupValues[2])
+                    add("https://ghfast.top" + m.groupValues[2])
+                }
+        }.distinct()
+        for (url in candidates) {
+            runCatching { HttpClient.getRaw(url) }
+                .onSuccess { if (it.isNotBlank()) return it }
+                .onFailure {
+                    Log.w(TAG, "下载音源脚本失败: $url -> ${it.javaClass.simpleName}: ${it.message}")
+                }
+        }
+        return content
     }
 
     /**
@@ -201,6 +221,8 @@ class UserApiManager(private val context: Context) {
     }
 
     companion object {
+        private const val TAG = "UserApiManager"
+
         @Volatile
         private var sharedInstance: UserApiManager? = null
 

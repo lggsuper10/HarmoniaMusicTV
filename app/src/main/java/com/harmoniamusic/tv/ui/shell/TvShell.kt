@@ -31,7 +31,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.harmoniamusic.tv.ui.screens.HistoryScreen
+import com.harmoniamusic.tv.ui.screens.ChartsScreen
 import com.harmoniamusic.tv.ui.screens.HomeScreen
 import com.harmoniamusic.tv.ui.screens.MyListScreen
 import com.harmoniamusic.tv.ui.screens.PlayerScreen
@@ -150,7 +150,7 @@ fun TvShell() {
                                 contentFocusTick++
                             },
                         )
-                        TvTab.NEW -> HistoryScreen()
+                        TvTab.NEW -> ChartsScreen()
                         TvTab.QUEUE -> QueueScreen()
                         TvTab.MYLIST -> MyListScreen()
                         TvTab.SEARCH -> SearchScreen()

@@ -185,10 +185,10 @@ private fun readLocalMeta(context: Context, file: File, folderCover: String?): L
 
 /** 把标签内嵌封面写到缓存目录，返回可直接交给 Coil/ExoPlayer 的 file:// URI。 */
 private fun saveEmbeddedCover(context: Context, file: File, bytes: ByteArray): String? = runCatching {
-    val dir = File(context.cacheDir, "local_art").apply { mkdirs() }
+    val dir = File(context.filesDir, "media_cache/covers").apply { mkdirs() }
     val key = (file.absolutePath + "|" + file.length() + "|" + file.lastModified())
         .hashCode().toString(16)
-    val out = File(dir, key + ".jpg")
+    val out = File(dir, "embedded_$key.img")
     if (!out.exists() || out.length() != bytes.size.toLong()) out.writeBytes(bytes)
     Uri.fromFile(out).toString()
 }.getOrNull()
