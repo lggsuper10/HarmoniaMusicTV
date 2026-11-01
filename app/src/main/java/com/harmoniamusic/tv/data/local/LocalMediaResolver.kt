@@ -18,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
@@ -41,9 +42,9 @@ import kotlin.math.min
 class LocalMediaResolver(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val cacheRoot = File(appContext.filesDir, media_cache)
-    private val coverDir = File(cacheRoot, covers)
-    private val lyricDir = File(cacheRoot, lyrics)
+    private val cacheRoot = File(appContext.filesDir, "media_cache")
+    private val coverDir = File(cacheRoot, "covers")
+    private val lyricDir = File(cacheRoot, "lyrics")
     private val searchMutex = Mutex()
     private val memoryMatches = mutableMapOf<String, List<MusicItem>>()
     private val memoryNoMatches = mutableSetOf<String>()
@@ -56,14 +57,14 @@ class LocalMediaResolver(context: Context) {
 
     suspend fun resolveCover(item: MusicItem): String? = withContext(Dispatchers.IO) {
         if (item.source != LOCAL_SOURCE) return@withContext item.img
-        val file = localFile(item) ?: return@withContext item.img?.takeIf { it.startsWith(http) }
+        val file = localFile(item) ?: return@withContext item.img?.takeIf { it.startsWith("http") }
         val key = cacheKey(file, item)
-        val cached = File(coverDir, $key.img).takeIf { it.isFile && it.length() > 0L }
+        val cached = File(coverDir, "$key.img").takeIf { it.isFile && it.length() > 0L }
         if (cached != null) return@withContext Uri.fromFile(cached).toString()
 
         // 扫描器已经把内嵌封面或同目录封面写进 img；先把这个可读文件持久化。
         item.img?.let { existing ->
-            if (existing.startsWith(file://)) {
+            if (existing.startsWith("file://")) {
                 val source = File(Uri.parse(existing).path.orEmpty())
                 if (source.isFile) {
                     if (source.absolutePath.startsWith(coverDir.absolutePath)) {
@@ -86,7 +87,7 @@ class LocalMediaResolver(context: Context) {
         if (!lookup.networkReached) return@withContext null
 
         for (candidate in lookup.matches) {
-            val url = candidate.img?.takeIf { it.startsWith(http) } ?: continue
+            val url = candidate.img?.takeIf { it.startsWith("http") } ?: continue
             downloadImage(url, key)?.let { return@withContext it }
         }
         markMiss(COVER_MISS, key)
@@ -97,7 +98,7 @@ class LocalMediaResolver(context: Context) {
         if (item.source != LOCAL_SOURCE) return@withContext null
         val file = localFile(item) ?: return@withContext null
         val key = cacheKey(file, item)
-        val cached = File(lyricDir, $key.lrc).takeIf { it.isFile && it.length() > 0L }
+        val cached = File(lyricDir, "$key.lrc").takeIf { it.isFile && it.length() > 0L }
         if (cached != null) return@withContext readText(cached.readBytes())
 
         findSidecarLyric(file)?.let { source ->
@@ -176,10 +177,10 @@ class LocalMediaResolver(context: Context) {
             MusicSources.builtin.values.map { source ->
                 async(Dispatchers.IO) {
                     try {
-                        source.search(query, 1, 10).list to true
+                        true to source.search(query, 1, 10).list
                     } catch (t: Throwable) {
                         Log.d(TAG, "media match search failed: ${source.sourceId}", t)
-                        emptyList<MusicItem>() to false
+                        false to emptyList<MusicItem>()
                     }
                 }
             }.awaitAll()
@@ -348,19 +349,147 @@ class LocalMediaResolver(context: Context) {
         }
     }
 
-    private fun readEmbeddedLyric(file: File): String? {
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(file.absolutePath)
-            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LYRICS)
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-        } catch (t: Throwable) {
-            null
-        } finally {
-            runCatching { retriever.release() }
+    private fun readEmbeddedLyric(file: File): String? = runCatching {
+        when (file.extension.lowercase()) {
+            "mp3" -> readId3Lyric(file)
+            "flac" -> readFlacLyric(file)
+            else -> null
         }
+    }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+
+    /** 读取 MP3 ID3v2 的 USLT（非同步歌词）帧。 */
+    private fun readId3Lyric(file: File): String? = RandomAccessFile(file, "r").use { raf ->
+        if (raf.length() < 10L) return@use null
+        val header = ByteArray(10)
+        raf.readFully(header)
+        if (header[0] != 'I'.code.toByte() || header[1] != 'D'.code.toByte() ||
+            header[2] != '3'.code.toByte()
+        ) {
+            return@use null
+        }
+        val version = header[3].toInt() and 0xff
+        if (version !in 3..4) return@use null
+        val tagSize = syncSafeInt(header, 6)
+        val end = minOf(raf.length(), 10L + tagSize)
+        var position = 10L
+        while (position + 10L <= end) {
+            raf.seek(position)
+            val frameHeader = ByteArray(10)
+            raf.readFully(frameHeader)
+            if (frameHeader[0] == 0.toByte()) break
+            val id = String(frameHeader, 0, 4, StandardCharsets.ISO_8859_1)
+            val frameSize = if (version == 4) syncSafeInt(frameHeader, 4)
+            else unsignedInt(frameHeader, 4)
+            if (frameSize <= 0 || position + 10L + frameSize > end) break
+            if (id == "USLT") {
+                raf.seek(position + 10L)
+                val data = ByteArray(frameSize)
+                raf.readFully(data)
+                decodeUslt(data)?.takeIf { it.isNotBlank() }?.let { return@use it }
+            }
+            position += 10L + frameSize
+        }
+        null
     }
+
+    private fun decodeUslt(data: ByteArray): String? {
+        if (data.size < 5) return null
+        val encoding = data[0].toInt() and 0xff
+        var start = 4
+        when (encoding) {
+            0, 3 -> {
+                while (start < data.size && data[start] != 0.toByte()) start++
+                start++
+            }
+            else -> {
+                while (start + 1 < data.size) {
+                    if (data[start] == 0.toByte() && data[start + 1] == 0.toByte()) {
+                        start += 2
+                        break
+                    }
+                    start += 2
+                }
+            }
+        }
+        if (start >= data.size) return null
+        val charset = when (encoding) {
+            0 -> StandardCharsets.ISO_8859_1
+            1 -> StandardCharsets.UTF_16
+            2 -> StandardCharsets.UTF_16BE
+            else -> StandardCharsets.UTF_8
+        }
+        return String(data, start, data.size - start, charset)
+            .trim('\u0000', '\uFEFF', '\r', '\n')
+            .trim()
+    }
+
+    /** 读取 FLAC 的 Vorbis Comment（LYRICS / UNSYNCEDLYRICS 字段）。 */
+    private fun readFlacLyric(file: File): String? = RandomAccessFile(file, "r").use { raf ->
+        if (raf.length() < 8L) return@use null
+        val marker = ByteArray(4)
+        raf.readFully(marker)
+        if (String(marker, StandardCharsets.ISO_8859_1) != "fLaC") return@use null
+        var position = 4L
+        while (position + 4L <= raf.length()) {
+            raf.seek(position)
+            val header = ByteArray(4)
+            raf.readFully(header)
+            val last = (header[0].toInt() and 0x80) != 0
+            val type = header[0].toInt() and 0x7f
+            val size = ((header[1].toInt() and 0xff) shl 16) or
+                ((header[2].toInt() and 0xff) shl 8) or
+                (header[3].toInt() and 0xff)
+            if (size < 0 || position + 4L + size > raf.length()) break
+            if (type == 4 && size in 1..MAX_LYRIC_BYTES) {
+                val data = ByteArray(size)
+                raf.readFully(data)
+                parseVorbisLyric(data)?.let { return@use it }
+            }
+            position += 4L + size
+            if (last) break
+        }
+        null
+    }
+
+    private fun parseVorbisLyric(data: ByteArray): String? {
+        var offset = 0
+        fun readLeInt(): Int? {
+            if (offset + 4 > data.size) return null
+            val value = (data[offset].toInt() and 0xff) or
+                ((data[offset + 1].toInt() and 0xff) shl 8) or
+                ((data[offset + 2].toInt() and 0xff) shl 16) or
+                ((data[offset + 3].toInt() and 0xff) shl 24)
+            offset += 4
+            return value
+        }
+        val vendorLength = readLeInt() ?: return null
+        if (vendorLength < 0 || offset + vendorLength > data.size) return null
+        offset += vendorLength
+        val count = readLeInt() ?: return null
+        repeat(count.coerceAtMost(10_000)) {
+            val length = readLeInt() ?: return null
+            if (length < 0 || offset + length > data.size) return null
+            val entry = String(data, offset, length, StandardCharsets.UTF_8)
+            offset += length
+            val key = entry.substringBefore('=', "").trim().uppercase()
+            if (key == "LYRICS" || key == "UNSYNCEDLYRICS") {
+                return entry.substringAfter('=', "").trim().takeIf { it.isNotEmpty() }
+            }
+        }
+        return null
+    }
+
+    private fun syncSafeInt(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0x7f) shl 21) or
+            ((bytes[offset + 1].toInt() and 0x7f) shl 14) or
+            ((bytes[offset + 2].toInt() and 0x7f) shl 7) or
+            (bytes[offset + 3].toInt() and 0x7f)
+
+    private fun unsignedInt(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xff) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xff) shl 8) or
+            (bytes[offset + 3].toInt() and 0xff)
 
     private fun copyImageToCache(source: File, key: String): String? = runCatching {
         if (!source.isFile || source.length() <= 0L || source.length() > MAX_IMAGE_BYTES) return null
@@ -521,6 +650,7 @@ class LocalMediaResolver(context: Context) {
         private const val LYRIC_MISS = "lyric_miss"
         private const val DURATION_TOLERANCE_MS = 3_000L
         private const val MAX_IMAGE_BYTES = 8L * 1024L * 1024L
+        private const val MAX_LYRIC_BYTES = 4 * 1024 * 1024
         private const val MISS_TTL_MS = 7L * 24L * 60L * 60L * 1000L
         private val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "bmp")
         private val COVER_NAMES = setOf(

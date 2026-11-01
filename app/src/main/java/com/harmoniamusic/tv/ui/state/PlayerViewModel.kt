@@ -243,7 +243,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 val cover = runCatching { mediaResolver.resolveFolderCover(folder.songs) }
                     .getOrNull()
                     ?.takeIf { it.isNotBlank() }
-                    ?: return@forEach
+                if (cover == null) return@forEach
                 _localFolders.value = _localFolders.value.map {
                     if (it.uri == folder.uri) it.copy(cover = cover) else it
                 }

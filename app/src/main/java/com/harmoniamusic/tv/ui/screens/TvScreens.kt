@@ -41,7 +41,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -1034,7 +1033,12 @@ private fun PlayerControlsToggle(
 
 /** 带时间轴高亮的歌词：根据当前播放进度定位当前行并自动滚动居中。 */
 @Composable
-private fun LyricsView(raw: String, positionMs: Long, modifier: Modifier = Modifier) {
+private fun LyricsView(
+    raw: String,
+    positionMs: Long,
+    loadState: LyricLoadState,
+    modifier: Modifier = Modifier,
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val lines = remember(raw) { parseLrc(raw) }
@@ -1047,7 +1051,11 @@ private fun LyricsView(raw: String, positionMs: Long, modifier: Modifier = Modif
     }
     if (lines.isEmpty()) {
         Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(TvText.noLyric, color = colors.dimText, fontSize = tv.tvFont(22))
+            Text(
+                text = if (loadState == LyricLoadState.LOADING) "正在匹配歌词…" else TvText.noLyric,
+                color = colors.dimText,
+                fontSize = tv.tvFont(22),
+            )
         }
     } else {
         LazyColumn(
@@ -1134,6 +1142,18 @@ private fun parseLrc(raw: String): List<Pair<Long, String>> {
         val text = line.replace(timeRe, "").trim()
         if (text.isNotEmpty()) times.forEach { t -> result.add(t to text) }
     }
+    if (result.isEmpty()) {
+        // 部分音源会返回无时间轴的纯文本歌词；按行铺开仍可阅读，聊胜于只显示“暂无歌词”。
+        return raw.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filterNot {
+                it.startsWith("[ti:") || it.startsWith("[ar:") || it.startsWith("[al:") ||
+                    it.startsWith("[by:") || it.startsWith("[offset:")
+            }
+            .mapIndexed { index, line -> (index * 4_000L) to line }
+            .toList()
+    }
     return result.sortedBy { it.first }
 }
 
@@ -1160,6 +1180,48 @@ private fun ControlButton(
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = colors.text, fontSize = tv.tvFont(21), maxLines = 1)
+    }
+}
+
+@Composable
+private fun ControlIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    primary: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val buttonSize = if (primary) 76 else 62
+    val iconSize = if (primary) 40 else 30
+    Box(
+        modifier = modifier
+            .size(tv.tvSize(buttonSize))
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(
+                when {
+                    primary -> colors.selectGreen
+                    focused -> colors.surfaceHigh
+                    else -> colors.surface
+                },
+                CircleShape,
+            )
+            .border(
+                width = if (focused) 4.dp else 0.dp,
+                color = colors.focus,
+                shape = CircleShape,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (primary) colors.bgDeep else if (focused) Color.White else colors.subtext,
+            modifier = Modifier.size(tv.tvSize(iconSize)),
+        )
     }
 }
 
@@ -1345,7 +1407,7 @@ fun MyListScreen(vm: PlayerViewModel = viewModel()) {
             state = CollectionDetailUiState(
                 title = folder.name,
                 meta = "${folder.songs.size} 首 · 本地文件夹",
-                cover = folder.songs.firstOrNull()?.img,
+                cover = folder.cover ?: folder.songs.firstOrNull()?.img,
                 songs = folder.songs,
             ),
             onBack = { openFolder = null },
@@ -1622,14 +1684,15 @@ private fun RecentTrackCard(item: MusicItem, isCurrent: Boolean, onClick: () -> 
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     var focused by remember { mutableStateOf(false) }
-    Column(
+    val cardShape = RoundedCornerShape(tv.tvSize(12))
+    Box(
         modifier = Modifier
-            .width(tv.tvSize(150))
+            .width(tv.tvSize(170))
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
             .background(
                 if (focused) colors.surfaceHigh else colors.surface,
-                RoundedCornerShape(tv.tvSize(12)),
+                cardShape,
             )
             .border(
                 width = when {
@@ -1638,27 +1701,60 @@ private fun RecentTrackCard(item: MusicItem, isCurrent: Boolean, onClick: () -> 
                     else -> 0.dp
                 },
                 color = if (focused) colors.focus else colors.selectGreen,
-                shape = RoundedCornerShape(tv.tvSize(12)),
+                shape = cardShape,
             )
-            .padding(tv.tvSize(8)),
+            .padding(tv.tvSize(6)),
     ) {
-        HomeCover(url = item.img, size = tv.tvSize(118), corner = 10)
-        Spacer(Modifier.height(tv.tvSize(6)))
-        Text(
-            text = item.name,
-            color = if (isCurrent) colors.selectGreen else colors.text,
-            fontSize = tv.tvFont(17),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = item.singer.ifBlank { TvText.unknownSinger },
-            color = colors.dimText,
-            fontSize = tv.tvFont(14),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Box(
+            modifier = Modifier
+                .size(tv.tvSize(158))
+                .clip(RoundedCornerShape(tv.tvSize(10))),
+        ) {
+            HomeCover(url = item.img, size = tv.tvSize(158), corner = 10)
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.28f), Color.Black.copy(alpha = 0.9f)),
+                        ),
+                    ),
+            )
+            if (isCurrent) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(tv.tvSize(9))
+                        .background(colors.selectGreen, CircleShape)
+                        .padding(horizontal = tv.tvSize(7), vertical = tv.tvSize(6)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    PlayingBars(color = colors.bgDeep)
+                }
+            }
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = tv.tvSize(11), vertical = tv.tvSize(10)),
+            ) {
+                Text(
+                    text = item.name,
+                    color = Color.White,
+                    fontSize = tv.tvFont(17),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = item.singer.ifBlank { TvText.unknownSinger },
+                    color = Color.White.copy(alpha = 0.72f),
+                    fontSize = tv.tvFont(14),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 
@@ -1696,7 +1792,11 @@ private fun LocalFolderCard(
             )
             .padding(tv.tvSize(8)),
     ) {
-        HomeCover(url = folder.songs.firstOrNull()?.img, size = tv.tvSize(146), corner = 10)
+        HomeCover(
+            url = folder.cover ?: folder.songs.firstOrNull()?.img,
+            size = tv.tvSize(146),
+            corner = 10,
+        )
         Spacer(Modifier.height(tv.tvSize(6)))
         Text(
             text = folder.name,
