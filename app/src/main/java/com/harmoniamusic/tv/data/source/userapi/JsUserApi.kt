@@ -79,18 +79,51 @@ class JsUserApi(
     }
 
     fun destroy() = engine.destroy()
+
+    /** 最近一次脚本初始化/执行错误，供设置页显示诊断信息。 */
+    fun loadError(): String? = engine.loadError()
 }
 
 /** 解析脚本 request handler 的返回值（可能是 url 字符串，或 {url:...}/{data:...} 对象）。 */
 fun parseUrlResult(result: String?): String? {
-    if (result == null) return null
-    val trimmed = result.trim()
-    return runCatching {
+    val trimmed = result?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    val candidate = runCatching {
         val obj = JSONObject(trimmed)
-        obj.optString("url").takeIf { it.isNotBlank() }
-            ?: obj.optString("data").takeIf { it.isNotBlank() }
+        extractUrlValue(obj)
     }.getOrElse {
         // 可能是 JSON 字符串字面量，如 "http://..."
         trimmed.removeSurrounding("\"")
-    }.takeIf { !it.isNullOrBlank() }
+    }
+    return normalizeStreamUrl(candidate)
+}
+
+private fun extractUrlValue(obj: JSONObject, depth: Int = 0): String? {
+    if (depth > 3) return null
+    for (key in listOf("url", "data", "result")) {
+        when (val value = obj.opt(key)) {
+            is String -> normalizeStreamUrl(value)?.let { return it }
+            is JSONObject -> extractUrlValue(value, depth + 1)?.let { return it }
+        }
+    }
+    return null
+}
+
+/**
+ * 脚本桥接会把 JS 的 undefined/null 序列化为字符串 "null"。
+ * 这里统一拒绝空值和非 http(s) 地址，避免把 "null" 交给 ExoPlayer 当成文件名打开。
+ */
+fun normalizeStreamUrl(value: String?): String? {
+    val candidate = value?.trim()
+        ?.removeSurrounding("\"")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
+    if (candidate.equals("null", ignoreCase = true) ||
+        candidate.equals("undefined", ignoreCase = true) ||
+        candidate.equals("none", ignoreCase = true)
+    ) return null
+    if (!candidate.startsWith("http://", ignoreCase = true) &&
+        !candidate.startsWith("https://", ignoreCase = true)
+    ) return null
+    return candidate
 }

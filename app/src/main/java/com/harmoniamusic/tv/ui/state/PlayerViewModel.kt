@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import com.harmoniamusic.tv.data.store.LocalFoldersStore
@@ -56,6 +57,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _playbackError = MutableStateFlow(false)
     val playbackError = _playbackError.asStateFlow()
 
+    /** 实际命中并交给播放器的流源，便于区分设置项与失败后的回退。 */
+    private val _playbackStreamSource = MutableStateFlow<String?>(null)
+    val playbackStreamSource = _playbackStreamSource.asStateFlow()
+
+    private var playJob: Job? = null
+
     /**
      * “有曲目被点播”的信号（自增计数）；Shell 监听它来把播放页（PlayerScreen）打开，
      * 保证即使取流失败，点歌也有可见反馈，而不是“没反应”。
@@ -82,15 +89,41 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _activeSource = MutableStateFlow(sourceStore.getActive())
     val activeSource = _activeSource.asStateFlow()
 
-    /** 切换播放源；aggregate 表示聚合全部内置源。 */
+    /** 切换目录音源；aggregate 表示搜索聚合全部内置源。 */
     fun setActiveSource(id: String) {
         sourceStore.setActive(id)
         _activeSource.value = id
+
+        val nextSearchSource = searchSourceFor(id)
+        if (_tvSearchSource.value != nextSearchSource) {
+            _tvSearchSource.value = nextSearchSource
+            if (tvSearchKeyword.isNotBlank()) searchTv(tvSearchKeyword, 1)
+        }
+
+        val nextChartSource = chartSourceFor(id)
+        if (_chartSourceId.value != nextChartSource) {
+            _chartSourceId.value = nextChartSource
+            boardCache.clear()
+            boardLoadToken++
+            _boards.value = emptyList()
+            _selectedBangid.value = null
+            _boardList.value = emptyList()
+            _boardError.value = null
+            loadBoards(force = true)
+        }
     }
 
     /** 当前选中源；聚合时返回 null，供搜索/榜单按源过滤。 */
     private fun activeSourceId(): String? =
         _activeSource.value.takeIf { it != SourceStore.AGGREGATE && it.isNotBlank() }
+
+    private fun searchSourceFor(sourceId: String): String =
+        sourceId.takeIf { MusicSources.builtin.containsKey(it) } ?: SOURCE_ALL
+
+    private fun chartSourceFor(sourceId: String): String =
+        sourceId.takeIf { MusicSources.builtin.containsKey(it) }
+            ?: MusicSources.builtin.keys.firstOrNull()
+            ?: "wy"
 
     private val _sourceTests =
         MutableStateFlow<List<MusicSources.SourceTestResult>>(emptyList())
@@ -176,7 +209,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val chartPrefs = getApplication<Application>()
         .getSharedPreferences("tv_chart_state", Context.MODE_PRIVATE)
 
-    private val _chartSourceId = MutableStateFlow("wy")
+    private val _chartSourceId = MutableStateFlow(chartSourceFor(sourceStore.getActive()))
     val chartSourceId = _chartSourceId.asStateFlow()
 
     private val _boards = MutableStateFlow<List<BoardInfo>>(emptyList())
@@ -380,7 +413,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val limit: Int = 30,
     )
 
-    private val _tvSearchSource = MutableStateFlow("kw")
+    private val _tvSearchSource = MutableStateFlow(searchSourceFor(sourceStore.getActive()))
     val tvSearchSource = _tvSearchSource.asStateFlow()
 
     private val _tvSearchResults = MutableStateFlow<List<MusicItem>>(emptyList())
@@ -391,6 +424,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _tvSearchLoading = MutableStateFlow(false)
     val tvSearchLoading = _tvSearchLoading.asStateFlow()
+
+    /** 当前搜索结果对应的关键词；切回搜索页时用于恢复输入框和结果标题。 */
+    private val _tvSearchQuery = MutableStateFlow(String())
+    val tvSearchQuery = _tvSearchQuery.asStateFlow()
+
+    private val _tvSearchError = MutableStateFlow<String?>(null)
+    val tvSearchError = _tvSearchError.asStateFlow()
 
     private val _tvSearchHistory = MutableStateFlow(loadTvSearchHistory())
     val tvSearchHistory = _tvSearchHistory.asStateFlow()
@@ -413,6 +453,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val kw = keyword.trim()
         if (kw.isBlank()) return
         tvSearchKeyword = kw
+        _tvSearchQuery.value = kw
+        _tvSearchError.value = null
+        if (page == 1) {
+            _tvSearchResults.value = emptyList()
+            _tvSearchPage.value = TvSearchPageInfo()
+        }
         val seq = ++tvSearchSeq
         val source = _tvSearchSource.value
         _tvSearchLoading.value = true
@@ -438,8 +484,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     total = merged.total,
                     limit = merged.limit,
                 )
+                _tvSearchError.value = null
+            }.onFailure { error ->
+                if (seq != tvSearchSeq) return@onFailure
+                _tvSearchError.value = error.message
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "搜索失败，请稍后重试"
             }
-            _tvSearchLoading.value = false
+            if (seq == tvSearchSeq) _tvSearchLoading.value = false
         }
     }
 
@@ -447,6 +499,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     fun clearTvSearch() {
         tvSearchSeq++
         tvSearchKeyword = ""
+        _tvSearchQuery.value = String()
+        _tvSearchError.value = null
+        _tvSearchLoading.value = false
         _tvSearchResults.value = emptyList()
         _tvSearchPage.value = TvSearchPageInfo()
     }
@@ -495,7 +550,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun loadBoards(force: Boolean = false) {
         if (!force && _boards.value.isNotEmpty()) return
-        if (_boardsLoading.value) return
+        if (!force && _boardsLoading.value) return
 
         val sourceId = _chartSourceId.value
         val token = ++boardsLoadToken
@@ -719,6 +774,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun launchPlay(item: MusicItem) {
         val token = ++playToken
+        playJob?.cancel()
+        repo.stop()
         _current.value = item
         recentStore.add(item)
         _recent.value = recentStore.get()
@@ -726,9 +783,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _lyric.value = ""
         _lyricState.value = LyricLoadState.LOADING
         _playbackError.value = false
+        _playbackStreamSource.value = if (item.source == LOCAL_SOURCE) "本地文件" else null
         // 通知 Shell 打开播放页，保证点歌有可见反馈（无论是否真正播放成功）
         _openPlayerSignal.value += 1
-        viewModelScope.launch {
+        playJob = viewModelScope.launch {
             if (item.source == LOCAL_SOURCE) {
                 runCatching { player.play(item.songmid) }
                     .onFailure {
@@ -737,9 +795,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     }
             } else {
                 runCatching { repo.play(item) }
+                    .onSuccess { stream ->
+                        if (token == playToken) _playbackStreamSource.value = stream.sourceLabel
+                    }
                     .onFailure {
-                        _playbackError.value = true
-                        Log.e("ZlPlay", "播放失败: ${item.name} source=${item.source}", it)
+                        if (token == playToken) {
+                            _playbackError.value = true
+                            Log.e("ZlPlay", "播放失败: ${item.name} source=${item.source}", it)
+                        }
                     }
             }
         }

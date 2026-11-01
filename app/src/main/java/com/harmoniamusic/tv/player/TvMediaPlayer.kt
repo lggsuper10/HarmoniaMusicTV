@@ -86,6 +86,17 @@ class TvMediaPlayer(context: Context) {
     fun pause() = exoPlayer.pause()
     fun resume() = exoPlayer.play()
 
+    /** 换歌/取流前清空旧音源，避免新歌取流失败后旧歌继续播放。 */
+    fun stop() {
+        currentUrl = null
+        _error.value = null
+        _isPlaying.value = false
+        _positionMs.value = 0L
+        _durationMs.value = 0L
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+    }
+
     fun seekTo(ms: Long) = exoPlayer.seekTo(ms.coerceAtLeast(0))
     fun seekBy(deltaMs: Long) =
         exoPlayer.seekTo((exoPlayer.currentPosition + deltaMs).coerceAtLeast(0))

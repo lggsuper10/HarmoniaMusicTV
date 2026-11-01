@@ -78,6 +78,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.harmoniamusic.tv.ui.state.LocalFolder
@@ -760,6 +761,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     val lyric by vm.lyric.collectAsState()
     val lyricState by vm.lyricState.collectAsState()
     val error by vm.playbackError.collectAsState()
+    val playbackStreamSource by vm.playbackStreamSource.collectAsState()
     val mode by vm.playMode.collectAsState()
     val favorites by vm.favorites.collectAsState()
     val userPlaylists by vm.userPlaylists.collectAsState()
@@ -882,11 +884,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 Spacer(Modifier.width(tv.tvSize(20)))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(horizontalAlignment = Alignment.End) {
-                        val streamSourceName = if (current?.source == LOCAL_SOURCE) {
-                            "本地文件"
-                        } else {
-                            vm.userApiList().firstOrNull { it.active }?.name
-                                ?: MusicSources.displayName(current?.source ?: "")
+                        val streamSourceName = when {
+                            current == null -> ""
+                            current?.source == LOCAL_SOURCE -> "本地文件"
+                            else -> playbackStreamSource.orEmpty()
                         }
                         Text(
                             streamSourceName,
@@ -3617,12 +3618,12 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                 SourceCard(
                     id = "__hdr_builtin",
                     title = "搜索 / 榜单音源",
-                    subtitle = "选中后搜索与榜单走该源（单选）",
+                    subtitle = "歌曲信息源：搜索/榜单的封面、歌词与歌曲 ID 来自这里",
                     badge = "",
                     kind = "header",
                 ),
             )
-            add(SourceCard(SourceStore.AGGREGATE, "聚合音源", "搜索所有内置源（默认）", "预置"))
+            add(SourceCard(SourceStore.AGGREGATE, "聚合音源", "搜索所有内置源；榜单默认使用网易云", "预置"))
             MusicSources.builtin.keys.forEach { id ->
                 add(
                     SourceCard(
@@ -3638,7 +3639,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                     SourceCard(
                         id = "__hdr_api",
                         title = "取流音源 · 用户 API",
-                        subtitle = "选中作为优先取流（绕过会员限制，独立于上方搜索源）",
+                        subtitle = "音频流源：播放时优先用该 API 取流，独立于上方歌曲信息源",
                         badge = "",
                         kind = "header",
                     ),
@@ -3649,8 +3650,17 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                     SourceCard(
                         id = info.id,
                         title = info.name,
-                        subtitle = "取流源 · 支持 ${info.supportSources.joinToString("/")}",
-                        badge = if (info.active) "正在使用" else if (!info.enabled) "已停用" else "取流",
+                        subtitle = if (info.supportSources.isEmpty()) {
+                            "未初始化 · ${info.error ?: "脚本未上报音源"}"
+                        } else {
+                            "取流源 · 支持 ${info.supportSources.joinToString("/")}"
+                        },
+                        badge = when {
+                            !info.enabled -> "已停用"
+                            info.supportSources.isEmpty() -> "未就绪"
+                            info.active -> "正在使用"
+                            else -> "取流"
+                        },
                         kind = "userapi",
                     ),
                 )
@@ -3714,7 +3724,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
             )
             Spacer(Modifier.height(tv.tvSize(10)))
             Text(
-                text = "「搜索/榜单音源」与「取流音源」是两种独立选择，可同时各选一个，并非 Bug。",
+                text = "歌曲信息、海报、歌词来自上方目录源；音频流优先来自下方用户 API，两者独立选择。",
                 color = colors.dimText,
                 fontSize = tv.tvFont(16),
             )
@@ -3881,7 +3891,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
             )
             Spacer(Modifier.height(tv.tvSize(10)))
             Text(
-                text = "点击左侧用户 API 卡片设为优先取流源；此处可启用/停用、删除导入项。",
+                text = "用户 API 只负责音频取流；此处可启用/停用、删除导入项，海报与歌词仍来自目录源。",
                 color = colors.dimText,
                 fontSize = tv.tvFont(17),
             )
@@ -4105,157 +4115,401 @@ private fun SettingActionButton(label: String, onClick: () -> Unit) {
     }
 }
 
+
 /**
- * 搜索 Tab：复刻 RN screens/TV/Search.tsx。
- * 左栏：标题 + 输入框（虚拟键盘输入）+ 热门搜索 + 历史 + QWERTY 虚拟键盘；
- * 右栏：来源筛选（ALL/酷我/酷狗/QQ音乐/网易云/咪咕）+ 分页搜索结果。
+ * 搜索页：顶部搜索栏 + 搜索发现 / 大尺寸结果列表 + 按需展开的电视键盘。
+ * 进入时优先聚焦搜索框；键盘只在需要输入时占用屏幕空间。
  */
 @Composable
 fun SearchScreen(vm: PlayerViewModel = viewModel()) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var text by remember { mutableStateOf("") }
+    var text by rememberSaveable { mutableStateOf(String()) }
+    var keyboardVisible by rememberSaveable { mutableStateOf(false) }
+    var focusResultsAfterSearch by remember { mutableStateOf(false) }
+
     val results by vm.tvSearchResults.collectAsState()
     val pageInfo by vm.tvSearchPage.collectAsState()
     val loading by vm.tvSearchLoading.collectAsState()
     val source by vm.tvSearchSource.collectAsState()
     val history by vm.tvSearchHistory.collectAsState()
-    val kbFocus = remember { FocusRequester() }
+    val activeQuery by vm.tvSearchQuery.collectAsState()
+    val error by vm.tvSearchError.collectAsState()
+    val current by vm.current.collectAsState()
 
-    val hotWords = listOf("周杰伦", "林俊杰", "陈奕迅")
-    val sourceTabs = listOf(
-        PlayerViewModel.SOURCE_ALL, "kw", "kg", "tx", "wy", "mg",
-    )
+    val searchFieldFocus = remember { FocusRequester() }
+    val firstKeyFocus = remember { FocusRequester() }
+    val firstResultFocus = remember { FocusRequester() }
 
-    fun submit(kw: String = text) {
-        val k = kw.trim()
-        if (k.isNotBlank()) vm.searchTv(k, 1)
+    val hotWords = remember {
+        listOf(
+            "周杰伦", "林俊杰", "陈奕迅", "邓紫棋",
+            "薛之谦", "毛不易", "五月天", "周深",
+        )
+    }
+    val sourceTabs = remember {
+        listOf(PlayerViewModel.SOURCE_ALL) + MusicSources.builtin.keys
     }
 
-    // 进入搜索页时把焦点落在虚拟键盘第一个键上
+    fun submit(keyword: String = text) {
+        val query = keyword.trim()
+        if (query.isBlank()) {
+            keyboardVisible = true
+            return
+        }
+        text = query
+        keyboardVisible = false
+        focusResultsAfterSearch = true
+        vm.searchTv(query, 1)
+    }
+
     LaunchedEffect(Unit) {
+        if (text.isBlank() && activeQuery.isNotBlank()) text = activeQuery
         withFrameNanos { }
-        runCatching { kbFocus.requestFocus() }
+        withFrameNanos { }
+        runCatching { searchFieldFocus.requestFocus() }
+    }
+    LaunchedEffect(activeQuery) {
+        if (activeQuery.isNotBlank() && text.isBlank()) text = activeQuery
+    }
+    LaunchedEffect(keyboardVisible) {
+        if (!keyboardVisible) return@LaunchedEffect
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching { firstKeyFocus.requestFocus() }
+    }
+    LaunchedEffect(focusResultsAfterSearch, loading, results.size) {
+        if (!focusResultsAfterSearch || loading) return@LaunchedEffect
+        withFrameNanos { }
+        withFrameNanos { }
+        if (results.isNotEmpty()) {
+            runCatching { firstResultFocus.requestFocus() }
+        } else {
+            runCatching { searchFieldFocus.requestFocus() }
+        }
+        focusResultsAfterSearch = false
     }
 
-    Row(
+    BackHandler(enabled = keyboardVisible) {
+        keyboardVisible = false
+        runCatching { searchFieldFocus.requestFocus() }
+    }
+
+    val showingResults = activeQuery.isNotBlank() || loading || results.isNotEmpty() || error != null
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(26)),
-        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(56)),
+            .padding(horizontal = tv.tvSize(64), vertical = tv.tvSize(22)),
     ) {
-        // ---- 左栏 ----
-        Column(Modifier.weight(0.42f).fillMaxHeight()) {
-            Text(
-                text = TvText.searchTitle,
-                color = colors.text,
-                fontSize = tv.tvFont(36),
-                fontWeight = FontWeight.Bold,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(tv.tvSize(20)),
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = TvText.searchTitle,
+                    color = colors.text,
+                    fontSize = tv.tvFont(36),
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(tv.tvSize(4)))
+                Text(
+                    text = if (activeQuery.isNotBlank()) {
+                        if (loading) "${TvText.searching} · $activeQuery"
+                        else "${pageInfo.total} ${TvText.songs} · “$activeQuery”"
+                    } else {
+                        TvText.searchLandingHint
+                    },
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(17),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (activeQuery.isNotBlank()) {
+                SearchTextAction(TvText.clear) {
+                    text = String()
+                    keyboardVisible = false
+                    vm.clearTvSearch()
+                    runCatching { searchFieldFocus.requestFocus() }
+                }
+            }
+        }
+        Spacer(Modifier.height(tv.tvSize(14)))
+        SearchInputBar(
+            text = text,
+            focusRequester = searchFieldFocus,
+            onEdit = { keyboardVisible = true },
+            onSubmit = { submit() },
+        )
+        Spacer(Modifier.height(tv.tvSize(16)))
+
+        if (showingResults) {
+            SearchSourceRail(
+                source = source,
+                sourceTabs = sourceTabs,
+                pageInfo = pageInfo,
+                loading = loading,
+                onSelect = { vm.setTvSearchSource(it) },
             )
-            Spacer(Modifier.height(tv.tvSize(8)))
-            Text(TvText.searchInputHint, color = colors.dimText, fontSize = tv.tvFont(18))
-            Spacer(Modifier.height(tv.tvSize(18)))
-            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(tv.tvSize(12)))
-                        .background(colors.surface)
-                        .border(1.dp, colors.line, RoundedCornerShape(tv.tvSize(12)))
-                        .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(14)),
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    Text(
-                        text = text.ifBlank { TvText.searchPlaceholder },
-                        color = if (text.isBlank()) colors.dimText else colors.text,
-                        fontSize = tv.tvFont(20),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                SettingActionButton(TvText.search) { submit() }
-            }
-            Spacer(Modifier.height(tv.tvSize(22)))
-            Text(TvText.hotSearch, color = colors.dimText, fontSize = tv.tvFont(18))
             Spacer(Modifier.height(tv.tvSize(10)))
-            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12))) {
-                hotWords.forEach { kw ->
-                    SearchChip(kw) { text = kw; submit(kw) }
-                }
-            }
-            if (history.isNotEmpty()) {
-                Spacer(Modifier.height(tv.tvSize(14)))
-                Text(TvText.searchHistoryLabel, color = colors.dimText, fontSize = tv.tvFont(18))
-                Spacer(Modifier.height(tv.tvSize(10)))
-                Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12))) {
-                    history.take(4).forEach { kw ->
-                        SearchChip(kw) { text = kw; submit(kw) }
-                    }
-                    SearchChip(TvText.clear) { vm.clearTvSearchHistory() }
-                }
-            }
-            Spacer(Modifier.height(tv.tvSize(18)))
-            SearchKeyboard(
-                firstKeyFocus = kbFocus,
-                onKey = { ch -> text += ch },
+            SearchResultsPane(
+                query = activeQuery,
+                results = results,
+                current = current,
+                pageInfo = pageInfo,
+                loading = loading,
+                error = error,
+                firstResultFocus = firstResultFocus,
+                onRetry = { submit(activeQuery) },
+                onLoadMore = { vm.searchTv(activeQuery, pageInfo.page + 1) },
+                onPlay = { index -> vm.playList(results, index, TvText.searchResult) },
+                onAddToQueue = { vm.addToQueue(listOf(it), TvText.searchResult) },
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            SearchDiscovery(
+                history = history,
+                hotWords = hotWords,
+                onPick = { submit(it) },
+                onClearHistory = { vm.clearTvSearchHistory() },
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        if (keyboardVisible) {
+            Spacer(Modifier.height(tv.tvSize(12)))
+            SearchKeyboardPanel(
+                firstKeyFocus = firstKeyFocus,
+                onKey = { text += it },
                 onBackspace = { if (text.isNotEmpty()) text = text.dropLast(1) },
                 onClear = {
-                    text = ""
+                    text = String()
                     vm.clearTvSearch()
                 },
                 onSubmit = { submit() },
             )
         }
-        // ---- 右栏 ----
-        Column(Modifier.weight(0.58f).fillMaxHeight()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10))) {
-                sourceTabs.forEach { id ->
-                    SearchSourceTab(
-                        label = if (id == PlayerViewModel.SOURCE_ALL) "ALL" else MusicSources.displayName(id),
-                        selected = source == id,
-                        onClick = { vm.setTvSearchSource(id) },
-                    )
-                }
-            }
-            Spacer(Modifier.height(tv.tvSize(20)))
-            Text(
-                text = TvText.searchResult,
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
+    }
+}
+
+@Composable
+private fun SearchInputBar(
+    text: String,
+    focusRequester: FocusRequester,
+    onEdit: () -> Unit,
+    onSubmit: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(16))
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(tv.tvSize(68))
+                .focusRequester(focusRequester)
+                .onFocusChanged { focused = it.isFocused }
+                .clickable { onEdit() }
+                .background(if (focused) colors.surfaceHigh else colors.surface, shape)
+                .border(
+                    width = if (focused) 2.dp else 1.dp,
+                    color = if (focused) colors.selectGreen else colors.border,
+                    shape = shape,
+                )
+                .padding(horizontal = tv.tvSize(22)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Search,
+                contentDescription = null,
+                tint = if (focused) colors.selectGreen else colors.subtext,
+                modifier = Modifier.size(tv.tvSize(28)),
             )
-            Spacer(Modifier.height(tv.tvSize(6)))
+            Spacer(Modifier.width(tv.tvSize(14)))
             Text(
-                text = "${pageInfo.total} ${TvText.songs} / 第 ${pageInfo.page}/${pageInfo.maxPage} 页",
+                text = text.ifBlank { TvText.searchPlaceholder },
+                color = if (text.isBlank()) colors.dimText else colors.text,
+                fontSize = tv.tvFont(23),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = TvText.searchInputHint,
                 color = colors.dimText,
-                fontSize = tv.tvFont(18),
+                fontSize = tv.tvFont(14),
+                maxLines = 1,
             )
-            Spacer(Modifier.height(tv.tvSize(12)))
-            when {
-                loading && results.isEmpty() -> Text(
-                    TvText.searching,
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(20),
+        }
+        SettingActionButton(TvText.search) { onSubmit() }
+    }
+}
+
+@Composable
+private fun SearchSourceRail(
+    source: String,
+    sourceTabs: List<String>,
+    pageInfo: PlayerViewModel.TvSearchPageInfo,
+    loading: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+    ) {
+        Text(
+            text = TvText.searchSource,
+            color = colors.dimText,
+            fontSize = tv.tvFont(16),
+        )
+        sourceTabs.forEach { id ->
+            SearchSourceChip(
+                label = if (id == PlayerViewModel.SOURCE_ALL) TvText.allSources
+                else MusicSources.displayName(id),
+                selected = source == id,
+                onClick = { onSelect(id) },
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = if (loading) TvText.searching
+            else "${pageInfo.page}/${pageInfo.maxPage} · ${pageInfo.total} ${TvText.songs}",
+            color = colors.dimText,
+            fontSize = tv.tvFont(15),
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun SearchResultsPane(
+    query: String,
+    results: List<MusicItem>,
+    current: MusicItem?,
+    pageInfo: PlayerViewModel.TvSearchPageInfo,
+    loading: Boolean,
+    error: String?,
+    firstResultFocus: FocusRequester,
+    onRetry: () -> Unit,
+    onLoadMore: () -> Unit,
+    onPlay: (Int) -> Unit,
+    onAddToQueue: (MusicItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+
+    Column(modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(tv.tvSize(18)),
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = TvText.searchResult,
+                    color = colors.text,
+                    fontSize = tv.tvFont(26),
+                    fontWeight = FontWeight.Bold,
                 )
-                results.isEmpty() -> Text(
-                    TvText.emptySearchHint,
+                Spacer(Modifier.height(tv.tvSize(3)))
+                Text(
+                    text = if (loading) TvText.searching
+                    else "${pageInfo.total} ${TvText.songs} · ${TvText.searchPlayHint}",
                     color = colors.dimText,
-                    fontSize = tv.tvFont(20),
+                    fontSize = tv.tvFont(15),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                else -> LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
+            }
+            if (loading) {
+                LinearProgressIndicator(
+                    modifier = Modifier.width(tv.tvSize(130)).height(tv.tvSize(3)),
+                    color = colors.selectGreen,
+                    trackColor = colors.surfaceHigh,
+                )
+            }
+        }
+        Spacer(Modifier.height(tv.tvSize(10)))
+
+        when {
+            loading && results.isEmpty() -> SearchLoadingSkeleton(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            )
+            error != null && results.isEmpty() -> SearchMessageState(
+                title = TvText.loadFailed,
+                hint = error,
+                actionLabel = TvText.chartRetry,
+                onAction = onRetry,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            )
+            results.isEmpty() -> SearchMessageState(
+                title = TvText.searchNoResult,
+                hint = if (query.isBlank()) TvText.searchNoResultHint
+                else "“$query” · ${TvText.searchNoResultHint}",
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            )
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(7)),
                 ) {
-                    itemsIndexed(results) { index, item ->
-                        SongRow(item = item) { vm.playList(results, index, TvText.searchResult) }
+                    itemsIndexed(
+                        items = results,
+                        key = { index, item -> "${item.source}:${item.songmid}:$index" },
+                    ) { index, item ->
+                        SearchResultCard(
+                            index = index,
+                            item = item,
+                            isCurrent = current?.let {
+                                it.source == item.source && it.songmid == item.songmid
+                            } == true,
+                            focusRequester = if (index == 0) firstResultFocus else null,
+                            onClick = { onPlay(index) },
+                            onAddToQueue = { onAddToQueue(item) },
+                        )
                     }
                     if (pageInfo.page < pageInfo.maxPage) {
                         item {
-                            SettingActionButton(TvText.loadMore) {
-                                vm.searchTv(text, pageInfo.page + 1)
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = tv.tvSize(8)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                if (loading) {
+                                    Text(
+                                        text = TvText.searching,
+                                        color = colors.dimText,
+                                        fontSize = tv.tvFont(17),
+                                    )
+                                } else {
+                                    SettingActionButton(TvText.loadMore, onLoadMore)
+                                }
                             }
                         }
                     }
+                    item { Spacer(Modifier.height(tv.tvSize(8))) }
+                }
+                if (error != null) {
+                    Text(
+                        text = error,
+                        color = colors.danger,
+                        fontSize = tv.tvFont(14),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = tv.tvSize(4)),
+                    )
                 }
             }
         }
@@ -4263,123 +4517,557 @@ fun SearchScreen(vm: PlayerViewModel = viewModel()) {
 }
 
 @Composable
-private fun SearchChip(label: String, onClick: () -> Unit) {
+private fun SearchSourceChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var f by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(16))
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(18))
     Box(
         modifier = Modifier
-            .onFocusChanged { f = it.isFocused }
+            .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
-            .background(if (f) colors.surfaceHigh else colors.surface, shape)
-            .border(if (f) 3.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(8)),
+            .background(
+                when {
+                    selected -> colors.selectGreen
+                    focused -> colors.surfaceHigh
+                    else -> colors.surface
+                },
+                shape,
+            )
+            .border(if (focused) 2.dp else 0.dp, colors.focus, shape)
+            .padding(horizontal = tv.tvSize(17), vertical = tv.tvSize(7)),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            label,
-            color = if (f) Color.White else colors.subtext,
-            fontSize = tv.tvFont(18),
+            text = label,
+            color = if (selected || focused) Color.White else colors.subtext,
+            fontSize = tv.tvFont(16),
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
         )
     }
 }
 
 @Composable
-private fun SearchSourceTab(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun SearchTextAction(label: String, onClick: () -> Unit) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var f by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(18))
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(12))
     Box(
         modifier = Modifier
-            .onFocusChanged { f = it.isFocused }
+            .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
-            .background(
-                when {
-                    selected -> colors.selectGreen
-                    f -> colors.surfaceHigh
-                    else -> colors.surface
-                },
-                shape,
-            )
-            .border(width = if (f) 3.dp else 0.dp, color = colors.focus, shape)
-            .padding(horizontal = tv.tvSize(22), vertical = tv.tvSize(8)),
-        contentAlignment = Alignment.Center,
+            .background(if (focused) colors.surfaceHigh else colors.surface, shape)
+            .border(if (focused) 2.dp else 0.dp, colors.focus, shape)
+            .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(8)),
     ) {
         Text(
-            label,
-            color = if (selected || f) Color.White else colors.subtext,
-            fontSize = tv.tvFont(18),
+            text = label,
+            color = if (focused) Color.White else colors.subtext,
+            fontSize = tv.tvFont(16),
         )
     }
 }
 
-private val SEARCH_KEY_ROWS = listOf(
+@Composable
+private fun SearchResultCard(
+    index: Int,
+    item: MusicItem,
+    isCurrent: Boolean,
+    focusRequester: FocusRequester?,
+    onClick: () -> Unit,
+    onAddToQueue: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(10))
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .let { base ->
+                if (focusRequester != null) base.focusRequester(focusRequester) else base
+            }
+            .onFocusChanged { focused = it.isFocused }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp && event.key == Key.Menu) {
+                    onAddToQueue()
+                    true
+                } else {
+                    false
+                }
+            }
+            .clickable { onClick() }
+            .background(
+                when {
+                    focused -> colors.surfaceHigh
+                    isCurrent -> colors.selectGreen.copy(alpha = 0.1f)
+                    else -> colors.surface
+                },
+                shape,
+            )
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = when {
+                    focused -> colors.focus
+                    isCurrent -> colors.selectGreen
+                    else -> colors.line
+                },
+                shape = shape,
+            )
+            .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(8)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "%02d".format(index + 1),
+            color = if (focused) colors.selectGreen else colors.dimText,
+            fontSize = tv.tvFont(15),
+            modifier = Modifier.width(tv.tvSize(38)),
+        )
+        HomeCover(url = item.img, size = tv.tvSize(52), corner = 9)
+        Spacer(Modifier.width(tv.tvSize(14)))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = item.name,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(20),
+                fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(tv.tvSize(2)))
+            Text(
+                text = buildString {
+                    append(item.singer.ifBlank { TvText.unknownSinger })
+                    append(TvText.dot)
+                    append(item.albumName.ifBlank { TvText.unknownAlbum })
+                },
+                color = colors.subtext,
+                fontSize = tv.tvFont(14),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        SearchSourceBadge(item.source)
+        Spacer(Modifier.width(tv.tvSize(14)))
+        if (item.interval.isNotBlank()) {
+            Text(
+                text = item.interval,
+                color = colors.dimText,
+                fontSize = tv.tvFont(15),
+                modifier = Modifier.width(tv.tvSize(54)),
+            )
+        }
+        if (isCurrent) {
+            Spacer(Modifier.width(tv.tvSize(8)))
+            Text(
+                text = TvText.nowPlaying,
+                color = colors.selectGreen,
+                fontSize = tv.tvFont(13),
+                maxLines = 1,
+            )
+        }
+        if (focused) {
+            Spacer(Modifier.width(tv.tvSize(8)))
+            Icon(
+                imageVector = Icons.Rounded.PlayArrow,
+                contentDescription = null,
+                tint = colors.selectGreen,
+                modifier = Modifier.size(tv.tvSize(24)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchSourceBadge(source: String) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(6))
+    Box(
+        modifier = Modifier
+            .background(colors.primarySoft, shape)
+            .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(3)),
+    ) {
+        Text(
+            text = MusicSources.displayName(source),
+            color = colors.primaryHigh,
+            fontSize = tv.tvFont(12),
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun SearchLoadingSkeleton(modifier: Modifier = Modifier) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(10))
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(tv.tvSize(7)),
+    ) {
+        repeat(6) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(tv.tvSize(64))
+                    .background(colors.surface, shape)
+                    .padding(horizontal = tv.tvSize(14)),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(tv.tvSize(46))
+                        .background(colors.surfaceHigh, RoundedCornerShape(tv.tvSize(8))),
+                )
+                Spacer(Modifier.width(tv.tvSize(14)))
+                Column(verticalArrangement = Arrangement.spacedBy(tv.tvSize(7))) {
+                    Box(
+                        Modifier
+                            .width(tv.tvSize(330))
+                            .height(tv.tvSize(14))
+                            .background(colors.surfaceHigh, RoundedCornerShape(tv.tvSize(4))),
+                    )
+                    Box(
+                        Modifier
+                            .width(tv.tvSize(210))
+                            .height(tv.tvSize(10))
+                            .background(colors.surface, RoundedCornerShape(tv.tvSize(4))),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchMessageState(
+    title: String,
+    hint: String,
+    modifier: Modifier = Modifier,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = Icons.Rounded.Search,
+                contentDescription = null,
+                tint = colors.dimText,
+                modifier = Modifier.size(tv.tvSize(44)),
+            )
+            Spacer(Modifier.height(tv.tvSize(14)))
+            Text(
+                text = title,
+                color = colors.text,
+                fontSize = tv.tvFont(26),
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(tv.tvSize(6)))
+            Text(
+                text = hint,
+                color = colors.dimText,
+                fontSize = tv.tvFont(17),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (actionLabel != null && onAction != null) {
+                Spacer(Modifier.height(tv.tvSize(16)))
+                SettingActionButton(actionLabel, onAction)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchDiscovery(
+    history: List<String>,
+    hotWords: List<String>,
+    onPick: (String) -> Unit,
+    onClearHistory: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    Row(
+        modifier = modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(22)),
+    ) {
+        DiscoverPanel(
+            title = TvText.searchHistoryLabel,
+            actionLabel = if (history.isNotEmpty()) TvText.clear else null,
+            onAction = onClearHistory,
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+        ) {
+            if (history.isEmpty()) {
+                Text(
+                    text = TvText.searchEmptyHistory,
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(18),
+                )
+            } else {
+                history.chunked(2).forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+                    ) {
+                        row.forEach { keyword ->
+                            SearchDiscoveryButton(
+                                label = keyword,
+                                leading = TvText.searchHistoryLabel,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onPick(keyword) },
+                            )
+                        }
+                        if (row.size == 1) Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        DiscoverPanel(
+            title = TvText.hotSearch,
+            actionLabel = TvText.searchDiscovery,
+            onAction = null,
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+        ) {
+            hotWords.chunked(2).forEachIndexed { rowIndex, row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+                ) {
+                    row.forEachIndexed { columnIndex, keyword ->
+                        SearchDiscoveryButton(
+                            label = keyword,
+                            leading = "%02d".format(rowIndex * 2 + columnIndex + 1),
+                            modifier = Modifier.weight(1f),
+                            onClick = { onPick(keyword) },
+                        )
+                    }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverPanel(
+    title: String,
+    actionLabel: String?,
+    onAction: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(18))
+    Column(modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                color = colors.text,
+                fontSize = tv.tvFont(24),
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.weight(1f))
+            if (actionLabel != null) {
+                if (onAction != null) {
+                    SearchTextAction(actionLabel, onAction)
+                } else {
+                    Text(
+                        text = actionLabel,
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(15),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(tv.tvSize(10)))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .background(colors.surface, shape)
+                .border(1.dp, colors.line, shape)
+                .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(16)),
+            verticalArrangement = Arrangement.spacedBy(tv.tvSize(9)),
+        ) {
+            content()
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = TvText.searchLandingHint,
+                color = colors.dimText,
+                fontSize = tv.tvFont(14),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchDiscoveryButton(
+    label: String,
+    leading: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(10))
+    Row(
+        modifier = modifier
+            .height(tv.tvSize(52))
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(if (focused) colors.surfaceHigh else colors.glass, shape)
+            .border(if (focused) 2.dp else 0.dp, colors.focus, shape)
+            .padding(horizontal = tv.tvSize(14)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = leading,
+            color = if (focused) colors.selectGreen else colors.dimText,
+            fontSize = tv.tvFont(13),
+            maxLines = 1,
+            modifier = Modifier.width(tv.tvSize(62)),
+        )
+        Text(
+            text = label,
+            color = if (focused) Color.White else colors.text,
+            fontSize = tv.tvFont(18),
+            fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+private val SEARCH_KEYBOARD_ROWS = listOf(
     listOf('Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'),
     listOf('A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'),
     listOf('Z', 'X', 'C', 'V', 'B', 'N', 'M'),
 )
 
 @Composable
-private fun SearchKeyboard(
+private fun SearchKeyboardPanel(
     firstKeyFocus: FocusRequester,
     onKey: (Char) -> Unit,
     onBackspace: () -> Unit,
     onClear: () -> Unit,
     onSubmit: () -> Unit,
 ) {
+    val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    Column(verticalArrangement = Arrangement.spacedBy(tv.tvSize(10))) {
-        SEARCH_KEY_ROWS.forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10))) {
-                row.forEachIndexed { index, ch ->
-                    SearchKeyButton(
-                        label = ch.toString(),
-                        modifier = Modifier.width(tv.tvSize(44)),
-                        requestFocus = index == 0 && ch == 'Q',
-                        focusRequester = firstKeyFocus,
-                        onClick = { onKey(ch) },
-                    )
+    val shape = RoundedCornerShape(tv.tvSize(18))
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.surface, shape)
+            .border(1.dp, colors.line, shape)
+            .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(12)),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(0.88f).align(Alignment.Center),
+            verticalArrangement = Arrangement.spacedBy(tv.tvSize(7)),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = TvText.tvKeyboard,
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(15),
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "按返回键收起",
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(13),
+                )
+            }
+            SEARCH_KEYBOARD_ROWS.forEachIndexed { rowIndex, row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
+                ) {
+                    row.forEachIndexed { index, char ->
+                        SearchKeyboardKey(
+                            label = char.toString(),
+                            modifier = Modifier.weight(1f),
+                            focusRequester = if (rowIndex == 0 && index == 0) firstKeyFocus else null,
+                            onClick = { onKey(char) },
+                        )
+                    }
                 }
             }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10))) {
-            SearchKeyButton(label = TvText.space, modifier = Modifier.weight(1.3f)) { onKey(' ') }
-            SearchKeyButton(label = TvText.backspace, modifier = Modifier.weight(1f)) { onBackspace() }
-            SearchKeyButton(label = TvText.clear, modifier = Modifier.weight(1f)) { onClear() }
-            SearchKeyButton(label = TvText.search, modifier = Modifier.weight(1.3f)) { onSubmit() }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
+            ) {
+                SearchKeyboardKey(
+                    label = TvText.space,
+                    modifier = Modifier.weight(1.3f),
+                    onClick = { onKey(' ') },
+                )
+                SearchKeyboardKey(
+                    label = TvText.backspace,
+                    modifier = Modifier.weight(1f),
+                    onClick = onBackspace,
+                )
+                SearchKeyboardKey(
+                    label = TvText.clear,
+                    modifier = Modifier.weight(1f),
+                    onClick = onClear,
+                )
+                SearchKeyboardKey(
+                    label = TvText.search,
+                    modifier = Modifier.weight(1.3f),
+                    onClick = onSubmit,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun SearchKeyButton(
+private fun SearchKeyboardKey(
     label: String,
     modifier: Modifier = Modifier,
-    requestFocus: Boolean = false,
     focusRequester: FocusRequester? = null,
     onClick: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var f by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(50)
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(tv.tvSize(8))
     Box(
         modifier = modifier
-            .height(tv.tvSize(40))
-            .let { if (requestFocus && focusRequester != null) it.focusRequester(focusRequester) else it }
-            .onFocusChanged { f = it.isFocused }
+            .height(tv.tvSize(36))
+            .let { base ->
+                if (focusRequester != null) base.focusRequester(focusRequester) else base
+            }
+            .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
-            .background(if (f) colors.selectGreen else colors.surface, shape)
-            .border(if (f) 3.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(12)),
+            .background(if (focused) colors.selectGreen else colors.surfaceHigh, shape)
+            .border(if (focused) 2.dp else 0.dp, colors.focus, shape),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            label,
-            color = if (f) Color.White else colors.subtext,
-            fontSize = tv.tvFont(18),
+            text = label,
+            color = if (focused) Color.White else colors.subtext,
+            fontSize = tv.tvFont(16),
             fontWeight = FontWeight.Bold,
         )
     }

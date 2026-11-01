@@ -45,7 +45,9 @@ class UserApiManager(private val context: Context) {
                         ),
                     )
                     engine.load(script, host)
-                    apis[preset.id] = JsUserApi(preset.id, host, engine)
+                    val api = JsUserApi(preset.id, host, engine)
+                    apis[preset.id] = api
+                    logLoadedSources(preset.id, api, engine)
                 }
             }
             // 2) 用户导入脚本（局域网/扫码导入，落盘于 UserApiStore）
@@ -65,10 +67,21 @@ class UserApiManager(private val context: Context) {
                     val engine = WebViewJsEngine(context)
                     val host = LxHost(currentScriptInfo = mapOf("id" to "imported_$idx"))
                     engine.load(script, host)
-                    apis["imported_$idx"] = JsUserApi("imported_$idx", host, engine)
+                    val api = JsUserApi("imported_$idx", host, engine)
+                    apis["imported_$idx"] = api
+                    logLoadedSources("imported_$idx", api, engine)
                 }
             }
             loaded = true
+        }
+    }
+
+    private fun logLoadedSources(id: String, api: JsUserApi, engine: WebViewJsEngine) {
+        val sources = api.sourceIds
+        if (sources.isEmpty()) {
+            Log.e(TAG, "音源脚本未上报 sources: id=$id, error=${engine.loadError() ?: "无"}")
+        } else {
+            Log.i(TAG, "音源脚本加载完成: id=$id, sources=${sources.joinToString("/")}")
         }
     }
 
@@ -125,8 +138,14 @@ class UserApiManager(private val context: Context) {
         )
     }
 
+    data class StreamResolution(
+        val url: String,
+        val providerId: String,
+        val providerName: String,
+    )
+
     /** 取流：优先选中的「优先取流源」，再遍历其他启用的脚本；禁用的不参与。 */
-    suspend fun getMusicUrl(item: MusicItem, quality: String): String? {
+    suspend fun resolveMusicUrl(item: MusicItem, quality: String): StreamResolution? {
         if (!loaded) init()
         val info = buildMusicInfo(item)
         val active = prefs.getActive()
@@ -134,11 +153,31 @@ class UserApiManager(private val context: Context) {
         for ((id, api) in ordered) {
             if (!prefs.isEnabled(id)) continue
             if (!api.sourceIds.contains(item.source)) continue
-            val url = runCatching { api.getMusicUrl(info, quality) }.getOrNull()
-            if (!url.isNullOrBlank()) return url
+            val url = normalizeStreamUrl(
+                runCatching { api.getMusicUrl(info, quality) }
+                    .onFailure { Log.w(TAG, "用户 API 取流异常: source=${item.source} api=$id", it) }
+                    .getOrNull(),
+            )
+            if (url != null) {
+                val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
+                Log.i(TAG, "用户 API 取流命中: source=${item.source} api=$id host=$host")
+                return StreamResolution(
+                    url = url,
+                    providerId = id,
+                    providerName = apiDisplayName(id),
+                )
+            }
+            Log.w(TAG, "用户 API 未返回可用地址: source=${item.source} api=$id")
         }
         return null
     }
+
+    /** 兼容只需要 URL 的调用方（如下载）。 */
+    suspend fun getMusicUrl(item: MusicItem, quality: String): String? =
+        resolveMusicUrl(item, quality)?.url
+
+    private fun apiDisplayName(id: String): String =
+        listApis().firstOrNull { it.id == id }?.name ?: id
 
     /** 用户 API 脚本清单（含支持源/启用/选中状态），供设置页展示与管理。 */
     data class ApiInfo(
@@ -147,6 +186,7 @@ class UserApiManager(private val context: Context) {
         val supportSources: List<String>,
         val enabled: Boolean,
         val active: Boolean,
+        val error: String? = null,
     )
 
     /** 从 user-api 脚本文本识别脚本名（lx-music 约定：头部注释 @name，或常量 SCRIPT_NAME）。识别不到返回 null。 */
@@ -177,6 +217,10 @@ class UserApiManager(private val context: Context) {
                 supportSources = api.sourceIds,
                 enabled = prefs.isEnabled(id),
                 active = prefs.getActive() == id,
+                error = api.loadError()
+                    ?.lineSequence()
+                    ?.firstOrNull()
+                    ?.take(120),
             )
         }
     }

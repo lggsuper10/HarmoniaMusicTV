@@ -3,7 +3,10 @@ package com.harmoniamusic.tv.data.source.userapi
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.harmoniamusic.tv.data.net.HttpClient
@@ -42,6 +45,9 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
     private var host: LxHost? = null
     private var initDeferred: CompletableDeferred<Boolean>? = null
 
+    @Volatile
+    private var scriptError: String? = null
+
     private val preloadJs: String = runCatching {
         context.applicationContext.assets
             .open("script/lx-host.js").bufferedReader(Charsets.UTF_8).use { it.readText() }
@@ -50,6 +56,13 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
     override suspend fun load(script: String, host: LxHost) {
         this.host = host
         host.attachEngine(this)
+        scriptError = null
+        val needsTranspile = MODERN_JS_MARKERS.containsMatchIn(script)
+        val babelSource = if (needsTranspile) babelJs() else ""
+        if (needsTranspile) {
+            Log.i(TAG, "检测到现代 JS 语法，启用兼容转译（${script.length} bytes）")
+            if (babelSource.isBlank()) Log.e(TAG, "Babel 兼容转译器加载失败")
+        }
         val initDeferredLocal = CompletableDeferred<Boolean>()
         initDeferred = initDeferredLocal
         suspendCancellableCoroutine<Unit> { cont ->
@@ -58,13 +71,21 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
                     val wv = WebView(context.applicationContext)
                     wv.settings.javaScriptEnabled = true
                     wv.settings.domStorageEnabled = true
+                    wv.webChromeClient = object : WebChromeClient() {
+                        override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                            val text = "${message.message()} (${message.sourceId()}:${message.lineNumber()})"
+                            when (message.messageLevel()) {
+                                ConsoleMessage.MessageLevel.ERROR -> Log.e(TAG, text)
+                                ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, text)
+                                else -> Unit
+                            }
+                            return true
+                        }
+                    }
                     wv.webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            // 先注入宿主骨架（定义 globalThis.lx），再注入用户脚本
-                            mainHandler.post {
-                                view?.evaluateJavascript(preloadJs, null)
-                                view?.evaluateJavascript(script, null)
-                            }
+                            // 先注入宿主骨架，再按需加载 Babel 转译，最后执行脚本。
+                            mainHandler.post { view?.let { injectScript(it, script, babelSource) } }
                         }
                     }
                     wv.addJavascriptInterface(NativeBridge(this@WebViewJsEngine), "nativeBridge")
@@ -77,7 +98,63 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
             }
         }
         // 等待脚本上报 inited；超时（12s）视作初始化失败但不阻塞
-        withTimeoutOrNull(12_000) { initDeferredLocal.await() }
+        val ready = withTimeoutOrNull(12_000) { initDeferredLocal.await() }
+        if (ready != true) {
+            val reason = scriptError ?: "超时或未上报 inited"
+            Log.e(TAG, "脚本初始化未完成: $reason")
+        }
+    }
+
+    private fun injectScript(view: WebView, script: String, babelSource: String) {
+        view.evaluateJavascript(preloadJs) {
+            if (babelSource.isBlank()) {
+                view.evaluateJavascript(directScript(script), null)
+            } else {
+                view.evaluateJavascript(babelSource) {
+                    view.evaluateJavascript(transpiledScript(script), null)
+                }
+            }
+        }
+    }
+
+    private fun directScript(script: String): String {
+        val source = JSONObject.quote(script)
+        return "(function(){try{(0,eval)($source);}catch(e){" +
+            "try{if(window.nativeBridge)window.nativeBridge.onScriptError(String((e&&e.stack)||e));}catch(_){}}})()"
+    }
+
+    private fun transpiledScript(script: String): String {
+        val source = JSONObject.quote(script)
+        return """
+            (function(){
+              try {
+                if (typeof Babel === 'undefined') throw new Error('Babel 兼容转译器未加载');
+                var output = Babel.transform($source, {
+                  presets: [['env', { targets: { chrome: '66' }, bugfixes: true }]],
+                  sourceType: 'script',
+                  compact: false
+                }).code;
+                (0, eval)(output);
+              } catch (e) {
+                try {
+                  if (window.nativeBridge) window.nativeBridge.onScriptError(String((e && e.stack) || e));
+                } catch (_) {}
+              }
+            })();
+        """.trimIndent()
+    }
+
+    private fun babelJs(): String {
+        babelCache?.let { return it }
+        synchronized(BABEL_LOCK) {
+            babelCache?.let { return it }
+            val text = runCatching {
+                context.applicationContext.assets
+                    .open(BABEL_ASSET).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            }.getOrDefault("")
+            babelCache = text
+            return text
+        }
     }
 
     /** 触发脚本 request 事件并 await 其 handler 的返回值（JSON 字符串）。25s 超时防止脚本无响应时永久卡死。 */
@@ -105,10 +182,20 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
     fun handleScriptSend(name: String, dataJson: String) {
         if (name == "inited" || name == "init") {
             runCatching { host?.captureSources(JSONObject(dataJson)) }
+                .onFailure { Log.e(TAG, "解析 inited 音源列表失败", it) }
             initDeferred?.complete(true)
         }
         // updateAlert 等事件可在将来扩展
     }
+
+    fun handleScriptError(message: String) {
+        val reason = message.trim().take(4_000)
+        scriptError = reason
+        Log.e(TAG, "脚本执行失败: $reason")
+        initDeferred?.complete(false)
+    }
+
+    fun loadError(): String? = scriptError
 
     fun handleScriptRequest(reqId: Int, url: String, optionsJson: String) {
         scope.launch {
@@ -158,6 +245,16 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
         }
         return map
     }
+
+    private companion object {
+        const val TAG = "WebViewJsEngine"
+        const val BABEL_ASSET = "script/babel-standalone-7.26.4.min.js"
+        val MODERN_JS_MARKERS = Regex("""\?\.|\?\?|\?\?=|\|\|=|&&=""")
+        val BABEL_LOCK = Any()
+
+        @Volatile
+        var babelCache: String? = null
+    }
 }
 
 /** 脚本与 Kotlin 之间的 native 桥（addJavascriptInterface 暴露为 globalThis.nativeBridge）。 */
@@ -175,5 +272,10 @@ class NativeBridge(private val engine: WebViewJsEngine) {
     @JavascriptInterface
     fun onRequestResult(reqId: Int, errJson: String?, resultJson: String?) {
         engine.handleRequestResult(reqId, errJson, resultJson)
+    }
+
+    @JavascriptInterface
+    fun onScriptError(message: String) {
+        engine.handleScriptError(message)
     }
 }

@@ -11,8 +11,17 @@
  *  - 脚本内部用 lx.request(url, options, cb) 发起 HTTP，cb(err, response) 由 native 异步回传。
  */
 (function () {
+  // Android TV 的旧 WebView（Chrome 66 等）没有 globalThis。
+  // 同时不能直接读取同名局部变量判断 nativeBridge，否则会被 var 提升成 undefined。
+  var __global =
+    typeof window !== "undefined"
+      ? window
+      : typeof globalThis !== "undefined"
+        ? globalThis
+        : this;
+  if (__global && !__global.globalThis) __global.globalThis = __global;
   var nativeBridge =
-    typeof nativeBridge !== "undefined" && nativeBridge ? nativeBridge : null;
+    __global && __global.nativeBridge ? __global.nativeBridge : null;
 
   var __handlers = {};
   var __reqId = 0;
@@ -295,6 +304,6 @@
     },
   };
 
-  globalThis.lx = lx;
-  globalThis.nativeBridge = nativeBridge;
+  __global.lx = lx;
+  __global.nativeBridge = nativeBridge;
 })();

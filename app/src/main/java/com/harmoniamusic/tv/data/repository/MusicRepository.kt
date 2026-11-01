@@ -1,12 +1,16 @@
 package com.harmoniamusic.tv.data.repository
 
+import android.util.Log
 import com.harmoniamusic.tv.data.source.BoardInfo
 import com.harmoniamusic.tv.data.source.MusicItem
 import com.harmoniamusic.tv.data.source.MusicSources
 import com.harmoniamusic.tv.data.source.PlaylistInfo
 import com.harmoniamusic.tv.data.source.SearchResult
 import com.harmoniamusic.tv.data.source.userapi.UserApiManager
+import com.harmoniamusic.tv.data.source.userapi.normalizeStreamUrl
 import com.harmoniamusic.tv.player.TvMediaPlayer
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * 音乐仓库：聚合各音源的搜索与取流，并驱动播放。
@@ -17,6 +21,11 @@ class MusicRepository(
     private val userApi: UserApiManager,
 ) {
 
+    data class PlaybackStream(
+        val url: String,
+        val sourceLabel: String,
+    )
+
     /** 并发搜索内置直连音源，返回 sourceId -> 搜索结果；sourceId 指定时只搜该源。 */
     suspend fun search(
         keyword: String,
@@ -25,16 +34,32 @@ class MusicRepository(
         sourceId: String? = null,
     ): Map<String, SearchResult> = MusicSources.searchAll(keyword, page, limit, sourceId)
 
-    /** 取某首歌的播放地址并交给播放引擎。quality: flac24bit/flac/320k/128k。
-     *  取流源优先：先用设置的「优先取流源」（含其他已启用脚本）取流，失败再回退歌曲直连源。 */
-    suspend fun play(item: MusicItem, quality: String = "128k") {
-        val streamUrl = runCatching { userApi.getMusicUrl(item, quality) }
-            .getOrNull()?.takeIf { it.isNotBlank() }
-            ?: runCatching {
+    /**
+     * 取某首歌的播放地址并交给播放引擎。quality: flac24bit/flac/320k/128k。
+     * 歌曲信息（封面/歌词）来自搜索或榜单的目录源；这里只负责选择独立的取流源。
+     * 优先使用设置的「优先取流源」（含其他已启用脚本），失败再回退歌曲对应的内置直连源。
+     */
+    suspend fun play(item: MusicItem, quality: String = "128k"): PlaybackStream {
+        val userStream = runCatching { userApi.resolveMusicUrl(item, quality) }
+            .onFailure { Log.w(TAG, "用户 API 取流失败: ${item.name} source=${item.source}", it) }
+            .getOrNull()
+        val builtinUrl = normalizeStreamUrl(
+            runCatching {
                 MusicSources.builtin[item.source]?.getMusicUrl(item.songmid, quality)
-            }.getOrNull()?.takeIf { it.isNotBlank() }
-            ?: throw IllegalArgumentException("取流失败: ${item.name}")
-        player.play(streamUrl)
+            }.onFailure {
+                Log.w(TAG, "内置源取流失败: ${item.name} source=${item.source}", it)
+            }.getOrNull(),
+        )
+        val stream = userStream?.let {
+            PlaybackStream(it.url, it.providerName)
+        } ?: builtinUrl?.let {
+            PlaybackStream(it, "${MusicSources.displayName(item.source)}直连")
+        } ?: throw IllegalArgumentException("取流失败: ${item.name}（用户 API 与内置取流源均未返回可用地址）")
+
+        currentCoroutineContext().ensureActive()
+        player.play(stream.url)
+        Log.i(TAG, "开始播放: song=${item.name} catalog=${item.source} provider=${stream.sourceLabel}")
+        return stream
     }
 
     /** 取某音源的榜单列表。 */
@@ -62,5 +87,10 @@ class MusicRepository(
 
     fun pause() = player.pause()
     fun resume() = player.resume()
+    fun stop() = player.stop()
     fun seekBy(deltaMs: Long) = player.seekBy(deltaMs)
+
+    private companion object {
+        const val TAG = "MusicRepository"
+    }
 }

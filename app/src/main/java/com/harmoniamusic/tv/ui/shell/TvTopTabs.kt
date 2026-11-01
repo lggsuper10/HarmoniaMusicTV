@@ -68,7 +68,7 @@ fun TvTopTabs(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "ZL-Music",
+            text = "HarmoniaMusic",
             color = colors.text,
             fontSize = tv.tvFont(30),
             fontWeight = FontWeight.Bold,
