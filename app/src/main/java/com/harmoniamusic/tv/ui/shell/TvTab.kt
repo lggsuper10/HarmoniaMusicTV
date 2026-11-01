@@ -10,7 +10,6 @@ enum class TvTab(val id: String, val label: String) {
     HOME("home", TvText.home),
     MYLIST("mylist", TvText.myMusic),
     NEW("new", TvText.charts),
-    QUEUE("queue", TvText.playlist),
     SEARCH("search", TvText.search),
     SETTINGS("settings", TvText.settings),
 }

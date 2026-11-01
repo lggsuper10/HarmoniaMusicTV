@@ -134,6 +134,10 @@ private fun TopTabItem(
                 val target = when (event.key) {
                     Key.DirectionLeft -> index - 1
                     Key.DirectionRight -> index + 1
+                    Key.DirectionDown -> {
+                        onConfirm(tab)
+                        return@onPreviewKeyEvent true
+                    }
                     else -> return@onPreviewKeyEvent false
                 }
                 if (target !in TvTab.entries.indices) return@onPreviewKeyEvent false

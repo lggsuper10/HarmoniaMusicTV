@@ -35,7 +35,6 @@ import com.harmoniamusic.tv.ui.screens.ChartsScreen
 import com.harmoniamusic.tv.ui.screens.HomeScreen
 import com.harmoniamusic.tv.ui.screens.MyListScreen
 import com.harmoniamusic.tv.ui.screens.PlayerScreen
-import com.harmoniamusic.tv.ui.screens.QueueScreen
 import com.harmoniamusic.tv.ui.screens.SearchScreen
 import com.harmoniamusic.tv.ui.screens.SettingsScreen
 import com.harmoniamusic.tv.ui.screens.DownloadPanel
@@ -150,8 +149,7 @@ fun TvShell() {
                                 contentFocusTick++
                             },
                         )
-                        TvTab.NEW -> ChartsScreen()
-                        TvTab.QUEUE -> QueueScreen()
+                        TvTab.NEW -> ChartsScreen(focusTick = contentFocusTick)
                         TvTab.MYLIST -> MyListScreen()
                         TvTab.SEARCH -> SearchScreen()
                         TvTab.SETTINGS -> SettingsScreen(onOpenDownload = { showDownload = true })

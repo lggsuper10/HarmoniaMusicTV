@@ -214,4 +214,12 @@ object TvText {
     const val downloadNoOnlineTip = "本地歌曲不支持下载，当前列表中没有可下载的在线歌曲"
 
     const val dot = " · "
+
+    const val chartHint = "左右切换榜单 · 下键查看歌曲"
+    const val chartRetry = "重试"
+    const val chartNoBoards = "该音源暂无排行榜"
+    const val chartNoSongs = "该榜单暂无歌曲"
+    const val chartLoadingSongs = "正在加载榜单歌曲..."
+    const val chartCurrent = "当前榜单"
+    const val chartSongHint = "OK 播放 · MENU 加入队列"
 }

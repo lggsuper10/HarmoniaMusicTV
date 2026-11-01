@@ -54,6 +54,10 @@ class RecentStore(context: Context) {
 
     fun updateArtwork(item: MusicItem) = updateArtwork(listOf(item))
 
+    fun remove(item: MusicItem) {
+        save(get().filterNot { it.source == item.source && it.songmid == item.songmid })
+    }
+
     fun clear() = prefs.edit().putString(KEY, "[]").apply()
 
     private fun save(list: List<MusicItem>) {

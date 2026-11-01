@@ -16,6 +16,8 @@ import com.harmoniamusic.tv.data.source.SearchResult
 import com.harmoniamusic.tv.data.store.FavoritesStore
 import com.harmoniamusic.tv.data.store.RecentStore
 import com.harmoniamusic.tv.data.store.SourceStore
+import com.harmoniamusic.tv.data.store.UserPlaylist
+import com.harmoniamusic.tv.data.store.UserPlaylistStore
 import com.harmoniamusic.tv.data.source.MusicSources
 import com.harmoniamusic.tv.player.TvMediaPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,6 +48,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val mediaResolver = LocalMediaResolver(app)
     private val favoritesStore = FavoritesStore(getApplication())
     private val recentStore = RecentStore(getApplication())
+    private val userPlaylistStore = UserPlaylistStore(getApplication())
     private val localFoldersStore = LocalFoldersStore(getApplication())
     private val sourceStore = SourceStore(getApplication())
 
@@ -170,11 +173,41 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
 
+    private val chartPrefs = getApplication<Application>()
+        .getSharedPreferences("tv_chart_state", Context.MODE_PRIVATE)
+
+    private val _chartSourceId = MutableStateFlow("wy")
+    val chartSourceId = _chartSourceId.asStateFlow()
+
     private val _boards = MutableStateFlow<List<BoardInfo>>(emptyList())
     val boards = _boards.asStateFlow()
 
+    private val _boardsLoading = MutableStateFlow(false)
+    val boardsLoading = _boardsLoading.asStateFlow()
+
+    private val _boardsError = MutableStateFlow<String?>(null)
+    val boardsError = _boardsError.asStateFlow()
+
+    private val _selectedBangid = MutableStateFlow(
+        chartPrefs.getString("selected_bangid", null),
+    )
+    val selectedBangid = _selectedBangid.asStateFlow()
+
     private val _boardList = MutableStateFlow<List<MusicItem>>(emptyList())
     val boardList = _boardList.asStateFlow()
+
+    private val _boardLoading = MutableStateFlow(false)
+    val boardLoading = _boardLoading.asStateFlow()
+
+    private val _boardError = MutableStateFlow<String?>(null)
+    val boardError = _boardError.asStateFlow()
+
+    private val _boardCovers = MutableStateFlow<Map<String, String>>(emptyMap())
+    val boardCovers = _boardCovers.asStateFlow()
+
+    private val boardCache = mutableMapOf<String, List<MusicItem>>()
+    private var boardsLoadToken = 0
+    private var boardLoadToken = 0
 
     private val _favorites = MutableStateFlow<List<MusicItem>>(emptyList())
     val favorites = _favorites.asStateFlow()
@@ -182,8 +215,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _recent = MutableStateFlow(recentStore.get())
     val recent = _recent.asStateFlow()
 
+    private val _userPlaylists = MutableStateFlow(userPlaylistStore.get())
+    val userPlaylists = _userPlaylists.asStateFlow()
+
     fun loadRecent() {
         _recent.value = recentStore.get()
+    }
+
+    fun removeRecent(item: MusicItem) {
+        recentStore.remove(item)
+        _recent.value = recentStore.get()
+    }
+
+    fun clearRecent() {
+        recentStore.clear()
+        _recent.value = emptyList()
     }
 
     private val _localFolders = MutableStateFlow<List<LocalFolder>>(emptyList())
@@ -194,6 +240,46 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadFavorites() {
         _favorites.value = favoritesStore.get()
+    }
+
+    fun loadUserPlaylists() {
+        _userPlaylists.value = userPlaylistStore.get()
+    }
+
+    fun createUserPlaylist(name: String): UserPlaylist? {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return null
+        val playlist = userPlaylistStore.create(trimmed)
+        _userPlaylists.value = userPlaylistStore.get()
+        return playlist
+    }
+
+    fun createUserPlaylistWithSong(name: String, item: MusicItem): UserPlaylist? {
+        val playlist = createUserPlaylist(name) ?: return null
+        userPlaylistStore.addSong(playlist.id, item)
+        _userPlaylists.value = userPlaylistStore.get()
+        return playlist
+    }
+
+    fun addToUserPlaylist(playlistId: String, item: MusicItem): Boolean {
+        val added = userPlaylistStore.addSong(playlistId, item)
+        _userPlaylists.value = userPlaylistStore.get()
+        return added
+    }
+
+    fun renameUserPlaylist(playlistId: String, name: String) {
+        userPlaylistStore.rename(playlistId, name)
+        _userPlaylists.value = userPlaylistStore.get()
+    }
+
+    fun removeUserPlaylist(playlistId: String) {
+        userPlaylistStore.delete(playlistId)
+        _userPlaylists.value = userPlaylistStore.get()
+    }
+
+    fun removeSongFromUserPlaylist(playlistId: String, item: MusicItem) {
+        userPlaylistStore.removeSong(playlistId, item)
+        _userPlaylists.value = userPlaylistStore.get()
     }
 
     fun addFavorite(item: MusicItem) {
@@ -235,8 +321,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             // 扫描结果通常比历史记录/收藏更完整，顺便用新读到的内嵌封面回填旧卡片。
             recentStore.updateArtwork(songs)
             favoritesStore.updateArtwork(songs)
+            userPlaylistStore.updateArtwork(songs)
             _recent.value = recentStore.get()
             _favorites.value = favoritesStore.get()
+            _userPlaylists.value = userPlaylistStore.get()
 
             // 没有内嵌/同目录封面的文件夹，用第一首歌做一次受控的在线封面匹配。
             folders.filter { it.cover.isNullOrBlank() && it.songs.isNotEmpty() }.forEach { folder ->
@@ -401,11 +489,53 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         prefs(HISTORY_PREFS).edit().putString(KEY_HISTORY, next.joinToString("\n")).apply()
     }
 
-    fun loadBoards() {
-        val sid = activeSourceId() ?: "wy"
+    /**
+     * 加载排行榜目录。排行榜使用页面自己的音源，不跟随全局播放音源静默变化。
+     * force=false 时保留已经加载好的目录，避免每次回到 Tab 都重新请求。
+     */
+    fun loadBoards(force: Boolean = false) {
+        if (!force && _boards.value.isNotEmpty()) return
+        if (_boardsLoading.value) return
+
+        val sourceId = _chartSourceId.value
+        val token = ++boardsLoadToken
+        _boardsLoading.value = true
+        _boardsError.value = null
         viewModelScope.launch {
-            runCatching { repo.getBoards(sid) }.onSuccess { _boards.value = it }
+            val result = runCatching { repo.getBoards(sourceId) }
+            if (token != boardsLoadToken) return@launch
+            _boardsLoading.value = false
+            result.onSuccess { list ->
+                _boards.value = list
+                if (list.isEmpty()) {
+                    _selectedBangid.value = null
+                    _boardList.value = emptyList()
+                    _boardLoading.value = false
+                    _boardError.value = null
+                    return@onSuccess
+                }
+                val target = _selectedBangid.value
+                    ?.takeIf { saved -> list.any { it.bangid == saved } }
+                    ?: list.first().bangid
+                _selectedBangid.value = target
+                chartPrefs.edit().putString("selected_bangid", target).apply()
+                loadBoard(target)
+            }.onFailure { error ->
+                _boardsError.value = error.message ?: "加载排行榜失败"
+            }
         }
+    }
+
+    /** 切换当前榜单：先清空/恢复缓存，再按请求序号防止旧响应覆盖新榜单。 */
+    fun selectBoard(bangid: String, force: Boolean = false) {
+        val changed = _selectedBangid.value != bangid
+        _selectedBangid.value = bangid
+        chartPrefs.edit().putString("selected_bangid", bangid).apply()
+        if (!changed && !force) {
+            if (_boardList.value.isEmpty() && !_boardLoading.value) loadBoard(bangid)
+            return
+        }
+        loadBoard(bangid)
     }
 
     private val _recommendPlaylists = MutableStateFlow<List<PlaylistInfo>>(emptyList())
@@ -463,10 +593,36 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun loadBoard(bangid: String) {
-        val sid = activeSourceId() ?: "wy"
+        val sourceId = _chartSourceId.value
+        val cacheKey = "$sourceId|$bangid"
+        val cached = boardCache[cacheKey]
+        val token = ++boardLoadToken
+        _boardError.value = null
+
+        if (cached != null) {
+            _boardList.value = cached
+            _boardLoading.value = false
+        } else {
+            _boardList.value = emptyList()
+            _boardLoading.value = true
+        }
+
         viewModelScope.launch {
-            runCatching { repo.getBoard(sid, bangid, 1, 200) }
-                .onSuccess { _boardList.value = it.list }
+            val result = runCatching { repo.getBoard(sourceId, bangid, 1, 200) }
+            if (token != boardLoadToken) return@launch
+            result.onSuccess { search ->
+                val list = search.list
+                boardCache[cacheKey] = list
+                _boardList.value = list
+                _boardLoading.value = false
+                list.firstOrNull()?.img?.takeIf { it.isNotBlank() }?.let { cover ->
+                    _boardCovers.value = _boardCovers.value + (cacheKey to cover)
+                }
+            }.onFailure { error ->
+                _boardLoading.value = false
+                _boardError.value = error.message ?: "加载榜单歌曲失败"
+                if (cached == null) _boardList.value = emptyList()
+            }
         }
     }
 
@@ -620,8 +776,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             syncQueue()
             recentStore.updateArtwork(updated)
             favoritesStore.updateArtwork(updated)
+            userPlaylistStore.updateArtwork(listOf(updated))
             _recent.value = recentStore.get()
             _favorites.value = favoritesStore.get()
+            _userPlaylists.value = userPlaylistStore.get()
             saveLastPlay(updated)
         }
     }
