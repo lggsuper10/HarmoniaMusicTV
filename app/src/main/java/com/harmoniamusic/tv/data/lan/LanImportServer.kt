@@ -17,10 +17,14 @@ import java.net.URLDecoder
  * 局域网导入服务（对应 RN `core/init/server` 的极简版）。
  *
  * 起一个 HTTP 服务：手机浏览器打开 `http://<east-ip>:<port>` 可看到一个文本表单，
- * 粘贴 user-api 脚本 JSON 后 POST 到 `/import`，回调 [onImport] 持久化。
+ * 填写可选显示名称，并粘贴 user-api 脚本 URL/内容后 POST 到 `/import`，回调 [onImport] 持久化。
  * 未引入 ZXing，故页面直接给出网址文本（电视端展示可后续补二维码）。
  */
-class LanImportServer(private val onImport: (String) -> Unit) {
+/**
+ * [onImport] 同步（挂起）导入并返回错误信息；返回 null 表示成功，非 null 为失败原因。
+ * 这样网页能拿到真实结果而不是「已提交」假成功。
+ */
+class LanImportServer(private val onImport: suspend (String, String?) -> String?) {
 
     private var serverSocket: ServerSocket? = null
     private var job: Job? = null
@@ -49,7 +53,7 @@ class LanImportServer(private val onImport: (String) -> Unit) {
         serverSocket = null
     }
 
-    private fun handle(socket: Socket) = socket.use { s ->
+    private suspend fun handle(socket: Socket) = socket.use { s ->
         val input: BufferedReader = s.getInputStream().bufferedReader()
         val requestLine = input.readLine() ?: return@use
         val parts = requestLine.split(" ")
@@ -77,12 +81,18 @@ class LanImportServer(private val onImport: (String) -> Unit) {
         } else ""
 
         val html: String = if (method == "POST" && path.startsWith("/import")) {
-            val api = parseApi(body)
+            val form = parseForm(body)
+            val api = form["api"].orEmpty().trim()
+            val name = form["name"]?.trim()?.ifBlank { null }
             if (api.isBlank()) {
-                "<html><body>导入内容为空</body></html>"
+                page("导入内容为空", failed = true)
             } else {
-                onImport(api)
-                "<html><body>导入成功，可在电视端查看。</body></html>"
+                val err = onImport(api, name)
+                if (err == null) {
+                    page("导入成功：电视端已加载该音源，可在「设置 → 取流音源·用户 API」中查看/启用。", failed = false)
+                } else {
+                    page("导入失败：${err.replace("<", "&lt;")}", failed = true)
+                }
             }
         } else {
             FORM_HTML
@@ -100,14 +110,22 @@ class LanImportServer(private val onImport: (String) -> Unit) {
         out.flush()
     }
 
-    /** 解析 `application/x-www-form-urlencoded` 里的 `api=` 字段。 */
-    private fun parseApi(body: String): String {
-        return body.split("&").firstOrNull { it.startsWith("api=") }
-            ?.substringAfter("api=")
-            ?.let { URLDecoder.decode(it, "UTF-8") }
-            ?.trim()
-            ?: ""
-    }
+    private fun page(message: String, failed: Boolean): String = """
+        <!DOCTYPE html><html><head><meta charset="utf-8"><title>导入结果</title>
+        <style>body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px}
+        .ok{color:#1a7f37}.err{color:#c0392b}</style></head><body>
+        <h2 class="${if (failed) "err" else "ok"}">${if (failed) "✗ " else "✓ "}$message</h2>
+        <p><a href="/">返回重新导入</a></p></body></html>
+    """.trimIndent()
+
+    /** 解析 `application/x-www-form-urlencoded` 表单。 */
+    private fun parseForm(body: String): Map<String, String> =
+        body.split("&").mapNotNull { pair ->
+            val key = pair.substringBefore('=', "").trim()
+            if (key.isBlank()) return@mapNotNull null
+            val value = URLDecoder.decode(pair.substringAfter('=', ""), "UTF-8")
+            key to value
+        }.toMap()
 
     private fun url(port: Int): String = "http://${localIp() ?: "127.0.0.1"}:$port"
 
@@ -129,11 +147,37 @@ class LanImportServer(private val onImport: (String) -> Unit) {
             <html><head><meta charset="utf-8"><title>导入音源</title>
             <style>body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px}
             textarea{width:100%;height:260px;font-family:monospace}button{padding:10px 24px;font-size:16px}</style>
+            <script>
+            document.addEventListener('DOMContentLoaded', function(){
+              var form = document.querySelector('form');
+              form.addEventListener('submit', function(e){
+                var ta = document.querySelector('textarea[name=api]');
+                var api = ta.value.trim();
+                if (/^https?:\/\//i.test(api)) {
+                  e.preventDefault();
+                  var btn = form.querySelector('button');
+                  var orig = btn.textContent;
+                  btn.disabled = true; btn.textContent = '正在浏览器端获取脚本…';
+                  var raw = api
+                    .replace(/^https?:\/\/(ghproxy\.net|gh-proxy\.com|ghfast\.top)\/https:\/\//i, 'https://')
+                    .replace(/^https?:\/\/(ghproxy\.net|gh-proxy\.com|ghfast\.top)\//i, 'https://');
+                  fetch(raw, {mode:'cors'}).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+                    .then(function(t){ ta.value = t; btn.disabled=false; btn.textContent=orig; form.submit(); })
+                    .catch(function(err){ btn.disabled=false; btn.textContent=orig;
+                      if(!confirm('浏览器获取脚本失败（'+err.message+'），改由电视端直接下载（常因网络受限失败）。继续？')) return;
+                      form.submit(); });
+                }
+              });
+            });
+            </script>
             </head><body>
             <h2>HarmoniaMusic 音源导入</h2>
-            <p>粘贴 user-api 脚本 JSON 后点击提交。</p>
+            <p>推荐：粘贴<strong>完整脚本内容</strong>（而非 URL）可 100% 成功。若只贴 URL，将优先由本机浏览器获取（需能访问 GitHub），失败再交由电视端下载。</p>
             <form method="post" action="/import">
-            <textarea name="api" placeholder="在此粘贴脚本内容"></textarea><br><br>
+            <label>显示名称（可选）</label><br>
+            <input name="name" maxlength="40" placeholder="例如：星海音乐源" style="width:100%;padding:8px;margin:6px 0 18px">
+            <label>脚本 URL 或内容</label><br>
+            <textarea name="api" placeholder="https://.../latest.js 或完整 user-api 脚本"></textarea><br><br>
             <button type="submit">提交导入</button>
             </form></body></html>
         """.trimIndent()

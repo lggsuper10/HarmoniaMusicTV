@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,10 +46,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.runtime.Composable
@@ -72,6 +81,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -95,7 +105,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import com.harmoniamusic.tv.data.lan.LanImportServer
 import com.harmoniamusic.tv.data.source.BoardInfo
 import com.harmoniamusic.tv.data.source.LOCAL_SOURCE
 import com.harmoniamusic.tv.data.source.MusicItem
@@ -104,16 +113,10 @@ import com.harmoniamusic.tv.data.source.MusicSources
 import com.harmoniamusic.tv.data.source.PlaylistInfo
 import com.harmoniamusic.tv.data.store.SourceStore
 import com.harmoniamusic.tv.data.store.UserPlaylist
-import com.harmoniamusic.tv.data.store.UserApiPrefs
-import com.harmoniamusic.tv.data.store.UserApiStore
 import com.harmoniamusic.tv.data.queue.PlayQueue
 import androidx.compose.foundation.layout.PaddingValues
-import com.harmoniamusic.tv.data.source.userapi.UserApiManager
-import com.harmoniamusic.tv.data.update.ApkInstaller
-import com.harmoniamusic.tv.data.update.UpdateChecker
-import com.harmoniamusic.tv.data.update.UpdateDownloader
-import com.harmoniamusic.tv.data.update.UpdateInfo
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import com.harmoniamusic.tv.ui.shell.TvTab
 import com.harmoniamusic.tv.ui.state.DownloadViewModel
 import com.harmoniamusic.tv.ui.state.LyricLoadState
@@ -769,6 +772,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     val downloadMessage by downloadVm.message.collectAsState()
     val toastContext = LocalContext.current
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var interactionTick by remember { mutableStateOf(0) }
     val controlsToggleRequester = remember { FocusRequester() }
     var downloadQualityItem by remember { mutableStateOf<MusicItem?>(null) }
     var downloadQualityOptions by remember { mutableStateOf<List<MusicQuality>>(emptyList()) }
@@ -807,27 +811,50 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
         withFrameNanos { }
         withFrameNanos { }
         vm.loadUserPlaylists()
-        runCatching { playRequester.requestFocus() }
     }
 
     LaunchedEffect(controlsVisible) {
-        if (!controlsVisible) {
-            withFrameNanos { }
-            runCatching { controlsToggleRequester.requestFocus() }
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching {
+            if (controlsVisible) playRequester.requestFocus()
+            else controlsToggleRequester.requestFocus()
         }
     }
 
-    // 点歌后若长时间未播放：区分“取流失败”与“准备中”，避免界面像“没反应”一样卡死
+    // 播放中一段时间无操作自动收纳控制栏；暂停或报错时保持可见。
+    LaunchedEffect(controlsVisible, isPlaying, error, interactionTick) {
+        if (!controlsVisible || !isPlaying || error) return@LaunchedEffect
+        delay(6_000)
+        controlsVisible = false
+    }
+
+    // 来源与播放状态完全分离：来源保持稳定，状态仅在准备/暂停/失败时显示。
     val statusText = when {
         error -> "无法播放：版权受限或取流失败"
-        isPlaying -> "正在播放"
-        else -> "准备中…"
+        isPlaying -> ""
+        pos > 0 && dur > 0 -> TvText.paused
+        else -> TvText.preparing
     }
-    val statusColor = if (error) colors.danger else colors.dimText
-    val isFav = current?.let { vm.isFavorite(it) } ?: false
+    val isFav = current?.let { item ->
+        favorites.any { it.source == item.source && it.songmid == item.songmid }
+    } ?: false
 
     Box(
-        modifier = Modifier.fillMaxSize().background(colors.bgDeep),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colors.bgDeep)
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                interactionTick++
+                if (!controlsVisible) {
+                    controlsVisible = true
+                    // 首次唤出时吞掉 OK，避免它同时触发右上角控制栏开关而立刻收起。
+                    if (event.key == Key.DirectionCenter || event.key == Key.Enter) true else false
+                } else {
+                    false
+                }
+            },
     ) {
         // 沉浸式背景：封面大图 + 暗化遮罩
         if (!current?.img.isNullOrBlank()) {
@@ -854,18 +881,18 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
             modifier = Modifier.fillMaxSize().padding(
                 start = tv.tvSize(70),
                 end = tv.tvSize(70),
-                top = tv.tvSize(56),
+                top = tv.tvSize(44),
                 bottom = tv.tvSize(24),
             ),
-            verticalArrangement = Arrangement.spacedBy(tv.tvSize(20)),
+            verticalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
         ) {
             // 顶部：歌名 / 歌手·专辑 + 来源与状态
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     Text(
                         current?.name ?: TvText.unknownSong,
                         color = colors.text,
-                        fontSize = tv.tvFont(52),
+                        fontSize = tv.tvFont(48),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -889,13 +916,26 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                             current?.source == LOCAL_SOURCE -> "本地文件"
                             else -> playbackStreamSource.orEmpty()
                         }
-                        Text(
-                            streamSourceName,
-                            color = colors.dimText,
-                            fontSize = tv.tvFont(18),
-                        )
-                        Spacer(Modifier.height(tv.tvSize(6)))
-                        Text(statusText, color = statusColor, fontSize = tv.tvFont(18))
+                        if (streamSourceName.isNotBlank()) {
+                            PlayerSourceBadge(streamSourceName)
+                            Spacer(Modifier.height(tv.tvSize(8)))
+                        }
+                        if (error) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+                            ) {
+                                Text(
+                                    statusText,
+                                    color = colors.danger,
+                                    fontSize = tv.tvFont(15),
+                                    maxLines = 1,
+                                )
+                                PlayerInlineAction(TvText.chartRetry) { vm.togglePlay() }
+                            }
+                        } else if (statusText.isNotBlank()) {
+                            Text(statusText, color = colors.dimText, fontSize = tv.tvFont(15))
+                        }
                     }
                     Spacer(Modifier.width(tv.tvSize(18)))
                     PlayerControlsToggle(
@@ -911,7 +951,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 horizontalArrangement = Arrangement.spacedBy(tv.tvSize(48)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PlayerArtwork(url = current?.img, size = tv.tvSize(300))
+                PlayerArtwork(url = current?.img, size = tv.tvSize(320))
                 LyricsView(
                     raw = lyric,
                     positionMs = pos,
@@ -929,41 +969,71 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                // 控制栏
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ControlIconButton(
-                        icon = Icons.Rounded.SkipPrevious,
-                        contentDescription = TvText.controlPrev,
-                    ) { vm.prev() }
-                    ControlIconButton(
-                        icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (isPlaying) TvText.pause else TvText.playNow,
-                        modifier = Modifier.focusRequester(playRequester),
-                        primary = true,
+                // 主流播放器控制栏：主播放键居中，次要操作在两侧。
+                Box(Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterStart),
+                        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(6)),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        vm.togglePlay()
-                    }
-                    ControlIconButton(
-                        icon = Icons.Rounded.SkipNext,
-                        contentDescription = TvText.controlNext,
-                    ) { vm.next() }
-                    Spacer(Modifier.width(tv.tvSize(10)))
-                    ControlButton(playModeLabel(mode)) { vm.cyclePlayMode() }
-                    ControlButton(if (isFav) "♥ 已喜欢" else "♡ 喜欢") {
-                        current?.let { vm.toggleFavorite(it) }
-                    }
-                    ControlButton(PlaylistText.addToPlaylist) {
-                        if (current == null) {
-                            Toast.makeText(toastContext, TvText.chooseSongFirst, Toast.LENGTH_SHORT).show()
-                        } else {
-                            addToPlaylistSong = current
+                        PlayerUtilityButton(
+                            icon = when (mode) {
+                                PlayQueue.Mode.ORDER -> Icons.Rounded.Repeat
+                                PlayQueue.Mode.SINGLE -> Icons.Rounded.RepeatOne
+                                PlayQueue.Mode.SHUFFLE -> Icons.Rounded.Shuffle
+                            },
+                            label = playModeLabel(mode),
+                        ) { vm.cyclePlayMode() }
+                        PlayerUtilityButton(
+                            icon = if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            label = if (isFav) TvText.liked else TvText.like,
+                            active = isFav,
+                        ) { current?.let { vm.toggleFavorite(it) } }
+                        PlayerUtilityButton(
+                            icon = Icons.AutoMirrored.Rounded.PlaylistAdd,
+                            label = PlaylistText.addToPlaylist,
+                        ) {
+                            if (current == null) {
+                                Toast.makeText(toastContext, TvText.chooseSongFirst, Toast.LENGTH_SHORT).show()
+                            } else {
+                                addToPlaylistSong = current
+                            }
                         }
+                        PlayerUtilityButton(
+                            icon = Icons.Rounded.Download,
+                            label = TvText.download,
+                        ) { requestDownload(current) }
                     }
-                    ControlButton(TvText.download) { requestDownload(current) }
-                    ControlButton(TvText.back) { onBack() }
+                    Row(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(18)),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ControlIconButton(
+                            icon = Icons.Rounded.SkipPrevious,
+                            contentDescription = TvText.controlPrev,
+                            label = TvText.controlPrev,
+                        ) { vm.prev() }
+                        ControlIconButton(
+                            icon = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                            contentDescription = if (isPlaying) TvText.pause else TvText.playNow,
+                            label = if (isPlaying) TvText.pause else TvText.play,
+                            modifier = Modifier.focusRequester(playRequester),
+                            primary = true,
+                        ) {
+                            vm.togglePlay()
+                        }
+                        ControlIconButton(
+                            icon = Icons.Rounded.SkipNext,
+                            contentDescription = TvText.controlNext,
+                            label = TvText.controlNext,
+                        ) { vm.next() }
+                    }
+                    PlayerUtilityButton(
+                        icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                        label = TvText.back,
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    ) { onBack() }
                 }
             }
         }
@@ -1310,6 +1380,136 @@ private fun DownloadQualityChoice(
     }
 }
 
+/** 播放页右上角音源徽标：只表达实际取流源，不承载播放状态。 */
+@Composable
+private fun PlayerSourceBadge(label: String) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(50)
+    Row(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.30f), shape)
+            .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
+            .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(7)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(tv.tvSize(7))
+                .background(colors.selectGreen, CircleShape),
+        )
+        Spacer(Modifier.width(tv.tvSize(8)))
+        Text(
+            text = "${TvText.source} · $label",
+            color = colors.text.copy(alpha = 0.92f),
+            fontSize = tv.tvFont(15),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 播放页错误状态里的轻量操作，例如“重试”。 */
+@Composable
+private fun PlayerInlineAction(label: String, onClick: () -> Unit) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier = Modifier
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .background(if (focused) colors.selectGreen else colors.surfaceHigh, shape)
+            .border(
+                width = if (focused) 3.dp else 1.dp,
+                color = if (focused) Color.White else colors.line,
+                shape = shape,
+            )
+            .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(4)),
+    ) {
+        Text(
+            text = label,
+            color = if (focused) colors.bgDeep else colors.text,
+            fontSize = tv.tvFont(13),
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+/** 图标优先的次要操作按钮：圆形图标 + 小标签，聚焦时轻微放大。 */
+@Composable
+private fun PlayerUtilityButton(
+    icon: ImageVector,
+    label: String,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.08f else 1f,
+        animationSpec = tween(160),
+        label = "playerUtilityScale",
+    )
+    Column(
+        modifier = modifier
+            .width(tv.tvSize(76))
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .onFocusChanged { focused = it.isFocused }
+            .clickable { onClick() }
+            .padding(vertical = tv.tvSize(2)),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(tv.tvSize(44))
+                .background(
+                    when {
+                        focused -> colors.selectGreen
+                        active -> colors.primarySoft
+                        else -> colors.surfaceHigh
+                    },
+                    CircleShape,
+                )
+                .border(
+                    width = if (focused) 3.dp else 1.dp,
+                    color = when {
+                        focused -> Color.White
+                        active -> colors.selectGreen.copy(alpha = 0.7f)
+                        else -> colors.line
+                    },
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = when {
+                    focused -> colors.bgDeep
+                    active -> colors.selectGreen
+                    else -> colors.subtext
+                },
+                modifier = Modifier.size(tv.tvSize(23)),
+            )
+        }
+        Spacer(Modifier.height(tv.tvSize(3)))
+        Text(
+            text = label,
+            color = if (focused || active) colors.text else colors.dimText,
+            fontSize = tv.tvFont(12),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 /** 播放页右上角：切换底部进度条与控制栏的显示状态。 */
 @Composable
 private fun PlayerControlsToggle(
@@ -1326,14 +1526,14 @@ private fun PlayerControlsToggle(
             .size(tv.tvSize(58))
             .onFocusChanged { focused = it.isFocused }
             .clickable { onToggle() }
-            .background(if (focused) colors.surfaceHigh else colors.surface, shape)
-            .border(if (focused) 3.dp else 0.dp, colors.focus, shape),
+            .background(if (focused) colors.selectGreen else colors.surface, shape)
+            .border(if (focused) 3.dp else 0.dp, Color.White, shape),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = if (visible) Icons.Rounded.ExpandMore else Icons.Rounded.ExpandLess,
             contentDescription = if (visible) "隐藏控制栏" else "显示控制栏",
-            tint = if (focused) Color.White else colors.subtext,
+            tint = if (focused) colors.bgDeep else colors.subtext,
             modifier = Modifier.size(tv.tvSize(30)),
         )
     }
@@ -1366,23 +1566,76 @@ private fun LyricsView(
             )
         }
     } else {
-        LazyColumn(
-            state = listState,
-            modifier = modifier,
-            verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
-            contentPadding = PaddingValues(vertical = tv.tvSize(40)),
-        ) {
-            items(lines.size) { i ->
-                val (_, text) = lines[i]
-                val cur = i == currentIndex
-                Text(
-                    text,
-                    color = if (cur) colors.selectGreen else colors.subtext,
-                    fontSize = if (cur) tv.tvFont(26) else tv.tvFont(20),
-                    fontWeight = if (cur) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+        BoxWithConstraints(modifier) {
+            val centerPadding = (maxHeight / 2 - tv.tvSize(28)).coerceAtLeast(tv.tvSize(32))
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+                contentPadding = PaddingValues(vertical = centerPadding),
+            ) {
+                items(lines.size) { i ->
+                    val (_, text) = lines[i]
+                    val cur = i == currentIndex
+                    val distance = if (currentIndex >= 0) kotlin.math.abs(i - currentIndex) else 99
+                    val targetAlpha = when {
+                        cur -> 1f
+                        distance == 1 -> 0.64f
+                        distance == 2 -> 0.38f
+                        else -> 0.20f
+                    }
+                    val alpha by animateFloatAsState(
+                        targetValue = targetAlpha,
+                        animationSpec = tween(240),
+                        label = "lyricLineAlpha",
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(tv.tvSize(3))
+                                .height(if (cur) tv.tvSize(30) else 0.dp)
+                                .background(
+                                    if (cur) colors.selectGreen else Color.Transparent,
+                                    RoundedCornerShape(50),
+                                ),
+                        )
+                        Spacer(Modifier.width(tv.tvSize(12)))
+                        Text(
+                            text = text,
+                            color = if (cur) colors.selectGreen else colors.text.copy(alpha = alpha),
+                            fontSize = if (cur) tv.tvFont(28) else tv.tvFont(20),
+                            lineHeight = tv.tvFont(if (cur) 36 else 28),
+                            fontWeight = if (cur) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
             }
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(tv.tvSize(72))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(colors.bgDeep.copy(alpha = 0.94f), Color.Transparent),
+                        ),
+                    ),
+            )
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(tv.tvSize(84))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, colors.bgDeep.copy(alpha = 0.96f)),
+                        ),
+                    ),
+            )
         }
     }
 }
@@ -1399,6 +1652,11 @@ private fun SeekBar(
     val tv = LocalTvMetrics.current
     var focused by remember { mutableStateOf(false) }
     val progress = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(420),
+        label = "seekProgress",
+    )
     Row(
         modifier = modifier
             .onFocusChanged { focused = it.isFocused }
@@ -1411,22 +1669,48 @@ private fun SeekBar(
                 }
             }
             .focusable()
-            .border(if (focused) 3.dp else 0.dp, colors.focus, RoundedCornerShape(tv.tvSize(10)))
-            .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(10)),
+            .border(if (focused) 2.dp else 0.dp, colors.focus, RoundedCornerShape(tv.tvSize(10)))
+            .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(8)),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
     ) {
-        Text(formatTime(positionMs), color = colors.dimText, fontSize = tv.tvFont(18))
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.weight(1f).height(tv.tvSize(10)),
-            color = colors.selectGreen,
-            trackColor = colors.surfaceHigh,
+        Text(
+            text = formatTime(positionMs),
+            color = if (focused) colors.text else colors.dimText,
+            fontSize = tv.tvFont(17),
+            modifier = Modifier.width(tv.tvSize(62)),
         )
-        Text(formatTime(durationMs), color = colors.dimText, fontSize = tv.tvFont(18))
-        if (focused) {
-            Text("◀ 左右键快进 ▶", color = colors.focus, fontSize = tv.tvFont(16))
+        BoxWithConstraints(
+            modifier = Modifier.weight(1f).height(tv.tvSize(20)),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            LinearProgressIndicator(
+                progress = { animatedProgress },
+                modifier = Modifier.fillMaxWidth().height(if (focused) tv.tvSize(8) else tv.tvSize(6)),
+                color = colors.selectGreen,
+                trackColor = colors.surfaceHigh,
+            )
+            val thumbSize = if (focused) 14 else 10
+            val maxOffset = (maxWidth - tv.tvSize(thumbSize)).coerceAtLeast(0.dp)
+            Box(
+                modifier = Modifier
+                    .offset(x = maxOffset * animatedProgress)
+                    .size(tv.tvSize(thumbSize))
+                    .background(if (focused) colors.focus else colors.selectGreen, CircleShape),
+            )
         }
+        Text(
+            text = formatTime(durationMs),
+            color = colors.dimText,
+            fontSize = tv.tvFont(17),
+            modifier = Modifier.width(tv.tvSize(62)),
+        )
+        Text(
+            text = "◀ 左右快进 ▶",
+            color = if (focused) colors.focus else Color.Transparent,
+            fontSize = tv.tvFont(14),
+            modifier = Modifier.width(tv.tvSize(112)),
+        )
     }
 }
 
@@ -1497,6 +1781,7 @@ private fun ControlIconButton(
     contentDescription: String,
     modifier: Modifier = Modifier,
     primary: Boolean = false,
+    label: String? = null,
     onClick: () -> Unit,
 ) {
     val colors = LocalTvColors.current
@@ -1504,31 +1789,72 @@ private fun ControlIconButton(
     var focused by remember { mutableStateOf(false) }
     val buttonSize = if (primary) 76 else 62
     val iconSize = if (primary) 40 else 30
-    Box(
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.08f else 1f,
+        animationSpec = tween(160),
+        label = "playerTransportScale",
+    )
+    Column(
         modifier = modifier
-            .size(tv.tvSize(buttonSize))
+            .width(tv.tvSize(if (primary) 100 else 82))
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
-            .background(
-                when {
-                    primary -> colors.selectGreen
-                    focused -> colors.surfaceHigh
-                    else -> colors.surface
-                },
-                CircleShape,
-            )
-            .border(
-                width = if (focused) 4.dp else 0.dp,
-                color = colors.focus,
-                shape = CircleShape,
-            ),
-        contentAlignment = Alignment.Center,
+            .padding(vertical = tv.tvSize(2)),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = if (primary) colors.bgDeep else if (focused) Color.White else colors.subtext,
-            modifier = Modifier.size(tv.tvSize(iconSize)),
+        Box(
+            modifier = Modifier
+                .size(tv.tvSize(buttonSize))
+                .background(
+                    when {
+                        focused -> colors.selectGreen
+                        primary -> colors.surfaceHigh
+                        else -> colors.surface
+                    },
+                    CircleShape,
+                )
+                .border(
+                    width = when {
+                        focused -> 4.dp
+                        primary -> 2.dp
+                        else -> 1.dp
+                    },
+                    color = when {
+                        focused -> Color.White
+                        primary -> colors.selectGreen.copy(alpha = 0.58f)
+                        else -> Color.White.copy(alpha = 0.10f)
+                    },
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = when {
+                    focused -> colors.bgDeep
+                    primary -> colors.selectGreen
+                    else -> colors.subtext
+                },
+                modifier = Modifier.size(tv.tvSize(iconSize)),
+            )
+        }
+        Spacer(Modifier.height(tv.tvSize(4)))
+        Text(
+            text = label ?: contentDescription,
+            color = when {
+                focused -> Color.White
+                primary -> colors.selectGreen
+                else -> colors.dimText
+            },
+            fontSize = tv.tvFont(12),
+            fontWeight = if (focused || primary) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -3565,532 +3891,6 @@ private fun storagePermission(): String =
 
 private fun hasStoragePermission(context: Context): Boolean =
     ContextCompat.checkSelfPermission(context, storagePermission()) == PackageManager.PERMISSION_GRANTED
-
-/** 设置页的音源卡片数据。 */
-private data class SourceCard(
-    val id: String,
-    val title: String,
-    val subtitle: String,
-    val badge: String,
-    val kind: String = "builtin",
-)
-
-/**
- * 设置 Tab：左侧音源列表（可切换，切换后搜索/榜单走该源），
- * 右侧应用更新与手机扫码导入。布局对齐参考图的两栏结构。
- */
-@Composable
-fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit = {}) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    val context = LocalContext.current
-    val userApiStore = remember { UserApiStore(context) }
-    val userApiPrefs = remember { UserApiPrefs(context) }
-    var activeUserApi by remember { mutableStateOf(userApiPrefs.getActive()) }
-    var userApiCards by remember { mutableStateOf(vm.userApiList()) }
-    fun refreshUserApis() {
-        userApiCards = vm.userApiList()
-        activeUserApi = userApiPrefs.getActive()
-    }
-    // 进入设置页时确保脚本已加载：init 只在播放/测试取流时触发，直接进设置页会因未加载而看不到导入源
-    LaunchedEffect(Unit) {
-        userApiCards = vm.ensureUserApiLoaded()
-        activeUserApi = userApiPrefs.getActive()
-    }
-    val activeSource by vm.activeSource.collectAsState()
-    var server by remember { mutableStateOf<LanImportServer?>(null) }
-    var lanUrl by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-    var checking by remember { mutableStateOf(false) }
-    var downloading by remember { mutableStateOf(false) }
-    var updateProgress by remember { mutableStateOf(0) }
-    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
-    var updateMsg by remember { mutableStateOf<String?>(null) }
-    val version = remember { UpdateChecker.currentVersion(context) }
-    val sourceTests by vm.sourceTests.collectAsState()
-    val isTestingSource by vm.isTesting.collectAsState()
-
-    var importCount by remember { mutableStateOf(userApiStore.list().size) }
-
-    val sourceCards = remember(userApiCards) {
-        buildList {
-            add(
-                SourceCard(
-                    id = "__hdr_builtin",
-                    title = "搜索 / 榜单音源",
-                    subtitle = "歌曲信息源：搜索/榜单的封面、歌词与歌曲 ID 来自这里",
-                    badge = "",
-                    kind = "header",
-                ),
-            )
-            add(SourceCard(SourceStore.AGGREGATE, "聚合音源", "搜索所有内置源；榜单默认使用网易云", "预置"))
-            MusicSources.builtin.keys.forEach { id ->
-                add(
-                    SourceCard(
-                        id = id,
-                        title = MusicSources.displayName(id),
-                        subtitle = "",
-                        badge = "预置",
-                    ),
-                )
-            }
-            if (userApiCards.isNotEmpty()) {
-                add(
-                    SourceCard(
-                        id = "__hdr_api",
-                        title = "取流音源 · 用户 API",
-                        subtitle = "音频流源：播放时优先用该 API 取流，独立于上方歌曲信息源",
-                        badge = "",
-                        kind = "header",
-                    ),
-                )
-            }
-            userApiCards.forEach { info ->
-                add(
-                    SourceCard(
-                        id = info.id,
-                        title = info.name,
-                        subtitle = if (info.supportSources.isEmpty()) {
-                            "未初始化 · ${info.error ?: "脚本未上报音源"}"
-                        } else {
-                            "取流源 · 支持 ${info.supportSources.joinToString("/")}"
-                        },
-                        badge = when {
-                            !info.enabled -> "已停用"
-                            info.supportSources.isEmpty() -> "未就绪"
-                            info.active -> "正在使用"
-                            else -> "取流"
-                        },
-                        kind = "userapi",
-                    ),
-                )
-            }
-        }
-    }
-
-    fun startLan() {
-        if (lanUrl == null) {
-            val s = LanImportServer { json ->
-                userApiStore.add(json)
-                scope.launch {
-                    vm.reloadUserApiAndAwait()
-                    importCount = userApiStore.list().size
-                    refreshUserApis()
-                }
-            }
-            lanUrl = s.start()
-            server = s
-        }
-    }
-    fun stopLan() {
-        server?.stop()
-        server = null
-        lanUrl = null
-    }
-    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { server?.stop() } }
-
-    val firstSourceRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        // 进入设置页后直接把焦点放到音源列表，避免落在右栏按钮上
-        withFrameNanos { }
-        runCatching { firstSourceRequester.requestFocus() }
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(28)),
-        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(56)),
-    ) {
-        Column(Modifier.width(tv.tvSize(500)).fillMaxHeight()) {
-            Text(
-                text = "设置",
-                color = colors.text,
-                fontSize = tv.tvFont(38),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(6)))
-            Text(
-                text = "音源、应用更新与手机扫码导入",
-                color = colors.dimText,
-                fontSize = tv.tvFont(18),
-            )
-            Spacer(Modifier.height(tv.tvSize(24)))
-            Text(
-                text = "音源 · 用户 API",
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            Text(
-                text = "歌曲信息、海报、歌词来自上方目录源；音频流优先来自下方用户 API，两者独立选择。",
-                color = colors.dimText,
-                fontSize = tv.tvFont(16),
-            )
-            Spacer(Modifier.height(tv.tvSize(6)))
-            Text(
-                text = "OK 键选择 · 长按 OK 对用户 API 启用/停用（导入项可在右侧删除）",
-                color = colors.dimText,
-                fontSize = tv.tvFont(16),
-            )
-            Spacer(Modifier.height(tv.tvSize(16)))
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                verticalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
-            ) {
-                itemsIndexed(sourceCards) { index, card ->
-                    when (card.kind) {
-                        "header" -> SourceGroupHeader(title = card.title, subtitle = card.subtitle)
-                        else -> SourceCardRow(
-                            card = card,
-                            active = if (card.kind == "userapi") card.id == activeUserApi else card.id == activeSource,
-                            onSelect = {
-                                if (card.kind == "userapi") {
-                                    vm.setActiveUserApi(card.id)
-                                    activeUserApi = card.id
-                                } else {
-                                    vm.setActiveSource(card.id)
-                                }
-                            },
-                            onLongPress = {
-                                if (card.kind == "userapi") {
-                                    val cur = userApiCards.firstOrNull { it.id == card.id }?.enabled ?: true
-                                    vm.setUserApiEnabled(card.id, !cur)
-                                    refreshUserApis()
-                                }
-                            },
-                            modifier = if (card.id == SourceStore.AGGREGATE) {
-                                Modifier.focusRequester(firstSourceRequester)
-                            } else {
-                                Modifier
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState())) {
-            Text(
-                text = "更新应用",
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            Text(
-                text = "从 GitHub Release 检查最新 TV APK，下载后会打开系统安装器。",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(6)))
-            Text(
-                text = "当前版本 · v$version",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(14)))
-            SettingWideButton(if (checking) "检查中..." else "检查更新") {
-                if (!checking && !downloading) {
-                    checking = true
-                    updateMsg = "检查中..."
-                    scope.launch {
-                        val info = UpdateChecker.check(context)
-                        updateInfo = info
-                        updateMsg = if (info == null) {
-                            "已是最新版本（$version）"
-                        } else {
-                            "发现新版本 ${info.version}（当前 ${info.currentVersion}）"
-                        }
-                        checking = false
-                    }
-                }
-            }
-            updateInfo?.let { info ->
-                Spacer(Modifier.height(tv.tvSize(12)))
-                SettingWideButton(
-                    if (downloading) "下载中 $updateProgress%" else "下载并安装 v${info.version}",
-                ) {
-                    if (!downloading) {
-                        downloading = true
-                        updateProgress = 0
-                        scope.launch {
-                            val f = UpdateDownloader.download(context, info) { updateProgress = it }
-                            downloading = false
-                            if (f != null) {
-                                updateMsg = "下载完成，正在安装..."
-                                ApkInstaller.install(context, f)
-                            } else {
-                                updateMsg = "下载失败"
-                            }
-                        }
-                    }
-                }
-            }
-            updateMsg?.let { msg ->
-                Spacer(Modifier.height(tv.tvSize(10)))
-                Text(msg, color = colors.selectGreen, fontSize = tv.tvFont(17))
-            }
-
-            Spacer(Modifier.height(tv.tvSize(34)))
-            Text(
-                text = "下载管理",
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            Text(
-                text = "查看下载任务与进度，歌单/详情页可加入下载。",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(14)))
-            SettingWideButton(TvText.downloadManage) {
-                onOpenDownload()
-            }
-
-            Spacer(Modifier.height(tv.tvSize(34)))
-            Text(
-                text = "导入用户 API",
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            Text(
-                text = "输入远程 js 脚本地址，导入后在左侧列表启用。",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(14)))
-            SettingWideButton(if (lanUrl == null) "手机扫码导入" else "停止手机扫码导入") {
-                if (lanUrl == null) startLan() else stopLan()
-            }
-            lanUrl?.let { url ->
-                Spacer(Modifier.height(tv.tvSize(12)))
-                Text(
-                    text = "请在手机浏览器打开：$url",
-                    color = colors.selectGreen,
-                    fontSize = tv.tvFont(18),
-                )
-                Text(
-                    text = "已导入音源：$importCount 个",
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(16),
-                )
-            }
-
-            Spacer(Modifier.height(tv.tvSize(34)))
-            Text(
-                text = "用户 API 管理",
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            Text(
-                text = "用户 API 只负责音频取流；此处可启用/停用、删除导入项，海报与歌词仍来自目录源。",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(12)))
-            if (userApiCards.isEmpty()) {
-                Text(
-                    "暂无用户 API（可扫码导入，或等待初始化完成）",
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(16),
-                )
-            }
-            for (info in userApiCards) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
-                ) {
-                    Text(
-                        text = info.name,
-                        color = colors.text,
-                        fontSize = tv.tvFont(18),
-                        modifier = Modifier.weight(1f),
-                    )
-                    SettingSmallButton(if (info.enabled) "停用" else "启用") {
-                        vm.setUserApiEnabled(info.id, !info.enabled)
-                        refreshUserApis()
-                    }
-                    if (info.id.startsWith("imported_")) {
-                        SettingSmallButton("删除") {
-                            val idx = info.id.removePrefix("imported_").toIntOrNull() ?: -1
-                            vm.removeImportedUserApi(idx)
-                            refreshUserApis()
-                        }
-                    }
-                }
-                Spacer(Modifier.height(tv.tvSize(8)))
-            }
-
-            Spacer(Modifier.height(tv.tvSize(34)))
-            Text(
-                text = "音源网络测试",
-                color = colors.text,
-                fontSize = tv.tvFont(28),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            Text(
-                text = "点击后并行检测所有内置音源的连通性。",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(14)))
-            SettingWideButton(if (isTestingSource) "测试中..." else "测试所有源") {
-                vm.testSources()
-            }
-            for (r in sourceTests) {
-                Spacer(Modifier.height(tv.tvSize(10)))
-                SourceTestRow(r = r)
-            }
-        }
-    }
-}
-
-/** 分组标题（不可聚焦），用于区分「搜索/榜单音源」与「取流音源」。 */
-@Composable
-private fun SourceGroupHeader(title: String, subtitle: String) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    Column(Modifier.padding(top = tv.tvSize(14), bottom = tv.tvSize(2))) {
-        Text(title, color = colors.selectGreen, fontSize = tv.tvFont(22), fontWeight = FontWeight.Bold)
-        if (subtitle.isNotBlank()) {
-            Spacer(Modifier.height(tv.tvSize(2)))
-            Text(subtitle, color = colors.dimText, fontSize = tv.tvFont(15))
-        }
-    }
-}
-
-/** 音源卡片：选中态绿底，焦点态白色描边；OK 选择，长按（用户 API）启用/停用。 */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun SourceCardRow(
-    card: SourceCard,
-    active: Boolean,
-    onSelect: () -> Unit,
-    onLongPress: () -> Unit = {},
-    modifier: Modifier = Modifier,
-) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(14))
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused }
-            .combinedClickable(onClick = onSelect, onLongClick = onLongPress)
-            .background(
-                when {
-                    active -> colors.selectGreen
-                    focused -> colors.surfaceHigh
-                    else -> Color(0xFF23262D)
-                },
-                shape,
-            )
-            .border(if (focused) 3.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(26), vertical = tv.tvSize(18)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = card.title,
-                color = if (active) Color(0xFF08110C) else colors.text,
-                fontSize = tv.tvFont(23),
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(tv.tvSize(6)))
-            Text(
-                text = card.subtitle,
-                color = if (active) Color(0xB308110C) else colors.dimText,
-                fontSize = tv.tvFont(16),
-            )
-        }
-        Text(
-            text = if (active) "正在使用" else card.badge,
-            color = if (active) Color(0xFF08110C) else colors.dimText,
-            fontSize = tv.tvFont(16),
-        )
-    }
-}
-
-/** 设置页右侧整行按钮。 */
-@Composable
-private fun SettingWideButton(label: String, onClick: () -> Unit) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(10))
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(tv.tvSize(66))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(if (focused) colors.surfaceHigh else Color(0xFF32353C), shape)
-            .border(if (focused) 3.dp else 0.dp, colors.focus, shape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = colors.text, fontSize = tv.tvFont(20))
-    }
-}
-
-/** 设置页小按钮（用户 API 的启用/停用/删除）。 */
-@Composable
-private fun SettingSmallButton(label: String, onClick: () -> Unit) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(10))
-    Box(
-        modifier = Modifier
-            .height(tv.tvSize(56))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(if (focused) colors.surfaceHigh else Color(0xFF32353C), shape)
-            .border(if (focused) 3.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(22)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = colors.text, fontSize = tv.tvFont(18))
-    }
-}
-
-/** 单个音源连通性测试结果行（名称 + 状态徽标）。 */
-@Composable
-private fun SourceTestRow(r: MusicSources.SourceTestResult) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    val okColor = colors.selectGreen
-    val failColor = Color(0xFFFF5252)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(4)),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = MusicSources.displayName(r.id),
-            color = colors.text,
-            fontSize = tv.tvFont(18),
-        )
-        val (label, color) = if (r.ok) {
-            "✓ 通畅 ${r.ms}ms" to okColor
-        } else {
-            "✗ ${r.detail}" to failColor
-        }
-        Text(text = label, color = color, fontSize = tv.tvFont(18))
-    }
-}
 
 @Composable
 private fun SettingActionButton(label: String, onClick: () -> Unit) {

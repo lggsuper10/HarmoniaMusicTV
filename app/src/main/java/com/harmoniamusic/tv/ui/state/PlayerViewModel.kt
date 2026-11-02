@@ -162,6 +162,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     /** 等待 reload 完成的版本（设置页刷新列表用）。 */
     suspend fun reloadUserApiAndAwait() = runCatching { userApi.reload() }
 
+    /** 下载/校验并导入 user-api 脚本；返回自动生成或用户填写的显示名称。 */
+    suspend fun importUserApi(content: String, displayName: String?): UserApiManager.ImportResult {
+        val result = userApi.importScript(content, displayName)
+        if (result.error != null) return result
+        val reloadError = runCatching { userApi.reload() }.exceptionOrNull()
+        return if (reloadError == null) {
+            result
+        } else {
+            UserApiManager.ImportResult(
+                name = result.name,
+                error = "脚本已保存，但加载失败：${reloadError.message ?: "未知错误"}",
+            )
+        }
+    }
+
     /** 用户 API 脚本清单（含支持源/启用/选中状态），供设置页管理。 */
     fun userApiList(): List<UserApiManager.ApiInfo> = userApi.listApis()
 
@@ -173,11 +188,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setActiveUserApi(id: String) = userApi.setActive(id)
     fun setUserApiEnabled(id: String, on: Boolean) = userApi.setEnabled(id, on)
+    fun renameImportedUserApi(idx: Int, name: String) = userApi.renameImported(idx, name)
     fun removeImportedUserApi(idx: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             userApi.removeImported(idx)
             runCatching { userApi.reload() }
         }
+    }
+
+    suspend fun removeImportedUserApiAndAwait(idx: Int) {
+        userApi.removeImported(idx)
+        userApi.reload()
     }
 
     val isPlaying = player.isPlaying

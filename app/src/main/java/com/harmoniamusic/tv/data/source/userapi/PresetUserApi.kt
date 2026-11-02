@@ -25,12 +25,19 @@ object PresetUserApis {
             author = "pdone",
             assetPath = "script/tv-default-user-api.js",
         ),
+        PresetUserApi(
+            id = "tv_preset_xinghai",
+            name = "星海音乐源",
+            author = "万去了了",
+            assetPath = "script/tv-default-xinghai.js",
+        ),
     )
 
     /** 音源中文显示名（设置页 / 源选择用）。 */
     fun displayName(id: String): String = when (id) {
         "tv_preset_grass" -> "野草"
         "tv_preset_juhe" -> "聚合音源"
+        "tv_preset_xinghai" -> "星海音乐源"
         else -> id
     }
 }

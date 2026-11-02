@@ -6,7 +6,7 @@
  * 本文件提供这些与 Kotlin 侧 nativeBridge（addJavascriptInterface 暴露）的桥接。
  *
  * 协议（对齐 lx-music 桌面/mobile）：
- *  - 脚本 load 后调用 lx.send(EVENT_NAMES.init, {sources}) 上报支持音源（宿主记为 'inited'）。
+ *  - 脚本 load 后调用 lx.send(EVENT_NAMES.inited, {sources}) 上报支持音源（兼容旧脚本的 init 别名）。
  *  - 宿主需要取流/搜索时调用脚本通过 lx.on('request') 注册的 handler，并 await 其返回值。
  *  - 脚本内部用 lx.request(url, options, cb) 发起 HTTP，cb(err, response) 由 native 异步回传。
  */
@@ -22,6 +22,7 @@
   if (__global && !__global.globalThis) __global.globalThis = __global;
   var nativeBridge =
     __global && __global.nativeBridge ? __global.nativeBridge : null;
+  try { console.error('lx-host: nativeBridge=' + (nativeBridge ? 'OK' : 'NULL') + ' keys=' + Object.keys(__global).filter(function(k){return /nativeBridge/i.test(k)}).join(',')); } catch (e) {}
 
   var __handlers = {};
   var __reqId = 0;
@@ -177,6 +178,7 @@
     currentScriptInfo: {},
     EVENT_NAMES: {
       request: "request",
+      inited: "inited",
       init: "inited",
       ready: "ready",
       config: "config",

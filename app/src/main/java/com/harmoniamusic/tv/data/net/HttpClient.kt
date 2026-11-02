@@ -20,13 +20,15 @@ object HttpClient {
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36"
     const val DEFAULT_TIMEOUT = 15000
 
-    /** GET 请求并返回原始文本（用于 JSONP 等需要自行解析的场景）。 */
-    suspend fun getRaw(
+    data class RawResponse(val code: Int, val body: String, val url: String)
+
+    /** GET 请求并保留 HTTP 状态码，供音源导入区分成功响应与错误页。 */
+    suspend fun getRawResponse(
         url: String,
         headers: Map<String, String> = emptyMap(),
         connectTimeoutMs: Int = DEFAULT_TIMEOUT,
         readTimeoutMs: Int = DEFAULT_TIMEOUT,
-    ): String = withContext(Dispatchers.IO) {
+    ): RawResponse = withContext(Dispatchers.IO) {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             setRequestProperty("User-Agent", UA)
@@ -36,11 +38,19 @@ object HttpClient {
         }
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val text = stream.bufferedReader(StandardCharsets.UTF_8).use(BufferedReader::readText)
+        val text = stream?.bufferedReader(StandardCharsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
         Log.d(TAG, "GET $url -> $code")
         conn.disconnect()
-        text
+        RawResponse(code, text, url)
     }
+
+    /** GET 请求并返回原始文本（用于 JSONP 等需要自行解析的场景）。 */
+    suspend fun getRaw(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        connectTimeoutMs: Int = DEFAULT_TIMEOUT,
+        readTimeoutMs: Int = DEFAULT_TIMEOUT,
+    ): String = getRawResponse(url, headers, connectTimeoutMs, readTimeoutMs).body
 
     /** GET 请求，可选自定义超时（网络测试场景需要更短）。 */
     suspend fun get(

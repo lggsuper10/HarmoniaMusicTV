@@ -107,11 +107,24 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
 
     private fun injectScript(view: WebView, script: String, babelSource: String) {
         view.evaluateJavascript(preloadJs) {
-            if (babelSource.isBlank()) {
-                view.evaluateJavascript(directScript(script), null)
-            } else {
-                view.evaluateJavascript(babelSource) {
-                    view.evaluateJavascript(transpiledScript(script), null)
+            // 先探测 WebView 是否原生支持可选链(?.)与空值合并(??)。
+            // Android 9 的 WebView 多数已通过 Play 更新到 Chrome 80+，原生即支持这些语法；
+            // 此时直接 eval 即可。强制 babel 转译反而会把本可运行的脚本转成坏代码
+            // （表现为 Promise[...] is not a function / Cannot read property 'body' of null）。
+            // 仅在不支持的旧 WebView 上才用 babel 兜底。
+            val probe = "(function(){try{var a;var ok=(function(){return a?.b})()===void 0;return ok&&((0,null)??true)===true}catch(e){return false}})()"
+            view.evaluateJavascript(probe) { result ->
+                val modern = result == "true"
+                if (!modern && babelSource.isNotBlank()) {
+                    Log.i(TAG, "WebView 不支持可选链，启用 babel 转译兜底")
+                    view.evaluateJavascript(babelSource) {
+                        view.evaluateJavascript(transpiledScript(script), null)
+                    }
+                } else {
+                    if (!modern) {
+                        Log.w(TAG, "WebView 不支持可选链且无 babel 兜底，脚本可能无法运行")
+                    }
+                    view.evaluateJavascript(directScript(script), null)
                 }
             }
         }
@@ -180,6 +193,7 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
     }
 
     fun handleScriptSend(name: String, dataJson: String) {
+        Log.d(TAG, "handleScriptSend name=$name data=${dataJson.take(160)}")
         if (name == "inited" || name == "init") {
             runCatching { host?.captureSources(JSONObject(dataJson)) }
                 .onFailure { Log.e(TAG, "解析 inited 音源列表失败", it) }
@@ -199,9 +213,9 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
 
     fun handleScriptRequest(reqId: Int, url: String, optionsJson: String) {
         scope.launch {
+            val opts = JSONObject(optionsJson)
+            val method = opts.optString("method", "GET").uppercase()
             val response = runCatching {
-                val opts = JSONObject(optionsJson)
-                val method = opts.optString("method", "GET").uppercase()
                 val headers = opts.optJSONObject("headers").toMap()
                 val body = opts.optString("body").takeIf { it.isNotBlank() }
                 val text = when (method) {
@@ -216,6 +230,8 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
             }.getOrElse { e ->
                 "{\"statusCode\":0,\"statusMessage\":${JSONObject.quote(e.message ?: "error")},\"body\":null}"
             }
+            val status = runCatching { JSONObject(response).optInt("statusCode", -1) }.getOrDefault(-1)
+            Log.d(TAG, "request $method ${url.take(60)} -> status=$status")
             mainHandler.post {
                 webView?.evaluateJavascript("lx.__resolveRequest($reqId, null, $response)", null)
             }

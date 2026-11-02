@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.text.Charsets
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 用户 API 管理中心：加载内置预设（assets 打包的 grass/juhe）与用户导入脚本，
@@ -26,11 +27,13 @@ class UserApiManager(private val context: Context) {
     private var loaded = false
     private val initMutex = Mutex()
     private val prefs = UserApiPrefs(context)
+    private val importErrors = ConcurrentHashMap<Int, String>()
 
     /** 加载所有预设与用户导入脚本（幂等，并发安全）。每个脚本各起一个 WebView 引擎。 */
     suspend fun init() = withContext(Dispatchers.IO) {
         initMutex.withLock {
             if (loaded) return@withContext
+            importErrors.clear()
             // 1) 内置预设（assets 打包，不可被用户修改）
             for (preset in PresetUserApis.list) {
                 runCatching {
@@ -52,24 +55,31 @@ class UserApiManager(private val context: Context) {
             }
             // 2) 用户导入脚本（局域网/扫码导入，落盘于 UserApiStore）
             val store = UserApiStore(context)
-            store.list().forEachIndexed { idx, entry ->
+            store.listEntries().forEachIndexed { idx, entry ->
+                val id = "imported_$idx"
                 runCatching {
-                    // 兼容「粘贴链接」导入：落盘的是 URL 时先下载真实脚本内容并回写（一次性迁移），
-                    // 否则 URL 被当 JS 执行只是个标签语句，脚本永远不会上报音源。
-                    val script = resolveScriptContent(entry)
-                    if (script != entry) {
-                        val all = store.list().toMutableList()
-                        if (idx < all.size && all[idx] == entry) {
-                            all[idx] = script
-                            store.saveAll(all)
-                        }
+                    // 兼容旧版「粘贴链接」导入：落盘的是 URL 时先下载真实脚本文本并回写。
+                    val script = resolveScriptContent(entry.script)
+                    val detectedName = normalizeName(entry.name) ?: deriveName(script, entry.script)
+                    if (script != entry.script) store.updateScriptAt(idx, script)
+                    if (entry.name.isNullOrBlank() && detectedName != null) {
+                        store.renameAt(idx, detectedName)
                     }
                     val engine = WebViewJsEngine(context)
-                    val host = LxHost(currentScriptInfo = mapOf("id" to "imported_$idx"))
+                    val host = LxHost(
+                        currentScriptInfo = mapOf(
+                            "id" to id,
+                            "name" to (detectedName ?: id),
+                        ),
+                    )
                     engine.load(script, host)
-                    val api = JsUserApi("imported_$idx", host, engine)
-                    apis["imported_$idx"] = api
-                    logLoadedSources("imported_$idx", api, engine)
+                    val api = JsUserApi(id, host, engine)
+                    apis[id] = api
+                    logLoadedSources(id, api, engine)
+                }.onFailure {
+                    importErrors[idx] = it.message?.lineSequence()?.firstOrNull()?.take(180)
+                        ?: "脚本加载失败"
+                    Log.e(TAG, "导入音源加载失败: id=$id", it)
                 }
             }
             loaded = true
@@ -88,30 +98,101 @@ class UserApiManager(private val context: Context) {
     /** 所有脚本支持（上报）的音源 id 合并去重，如 [wy, tx, kw, kg, mg]。 */
     fun supportedSources(): List<String> = apis.values.flatMap { it.sourceIds }.distinct()
 
+    data class ImportResult(val name: String? = null, val error: String? = null)
+
+    /** 导入脚本：立即下载并校验内容，成功后持久化自定义名称或自动生成名称。 */
+    suspend fun importScript(content: String, displayName: String?): ImportResult = withContext(Dispatchers.IO) {
+        val script = runCatching { resolveScriptContent(content) }.getOrElse {
+            return@withContext ImportResult(error = it.message ?: "音源导入失败")
+        }
+        val store = UserApiStore(context)
+        val entries = store.listEntries()
+        val requestedName = normalizeName(displayName)
+        val existing = entries.indexOfFirst { it.script == script }
+        if (existing >= 0) {
+            val existingName = normalizeName(entries[existing].name)
+                ?: deriveName(script, content)
+                ?: "导入 ${existing + 1}"
+            if (requestedName != null) store.renameAt(existing, requestedName)
+            return@withContext ImportResult(name = requestedName ?: existingName)
+        }
+        val name = requestedName
+            ?: deriveName(script, content)
+            ?: "导入 ${entries.size + 1}"
+        store.add(script, name)
+        ImportResult(name = name)
+    }
+
     /**
-     * 导入内容可能是脚本链接（http/https）：下载真实脚本文本；否则原样返回。
-     * 电视直连 GitHub 代理镜像时常因 TLS 被墙而失败，故对 GitHub raw 链接自动补多个
-     * 镜像候选（gh-proxy.com / ghfast.top）依次尝试，失败时打日志便于排查。
+     * 导入内容可能是脚本链接（http/https）：下载真实脚本文本；否则校验后原样返回。
+     * GitHub raw 地址会依次尝试直连与常见镜像，所有失败原因最终反馈到设置页。
      */
     private suspend fun resolveScriptContent(content: String): String {
-        val t = content.trim()
-        if (!t.startsWith("http://", true) && !t.startsWith("https://", true)) return content
-        val candidates = buildList {
-            add(t)
-            Regex("""^(https?://)[^/]+(/raw\.githubusercontent\.com/.+)$""", RegexOption.IGNORE_CASE)
-                .find(t)?.let { m ->
-                    add("https://gh-proxy.com" + m.groupValues[2])
-                    add("https://ghfast.top" + m.groupValues[2])
-                }
-        }.distinct()
-        for (url in candidates) {
-            runCatching { HttpClient.getRaw(url) }
-                .onSuccess { if (it.isNotBlank()) return it }
-                .onFailure {
-                    Log.w(TAG, "下载音源脚本失败: $url -> ${it.javaClass.simpleName}: ${it.message}")
-                }
+        val value = content.trim()
+        if (value.isEmpty()) throw IllegalArgumentException("脚本内容为空")
+        if (!value.startsWith("http://", true) && !value.startsWith("https://", true)) {
+            if (!looksLikeUserApi(value)) throw IllegalArgumentException("内容不是有效的 user-api 脚本")
+            return value
         }
-        return content
+
+        var lastError = "网络不可用"
+        for (url in scriptCandidates(value)) {
+            val response = try {
+                HttpClient.getRawResponse(
+                    url = url,
+                    connectTimeoutMs = 20_000,
+                    readTimeoutMs = 30_000,
+                )
+            } catch (error: Exception) {
+                lastError = "${error.javaClass.simpleName}: ${error.message ?: "连接失败"}"
+                Log.w(TAG, "下载音源脚本失败: $url -> $lastError")
+                continue
+            }
+            if (response.code !in 200..299) {
+                lastError = "HTTP ${response.code}"
+                Log.w(TAG, "下载音源脚本失败: $url -> HTTP ${response.code}")
+                continue
+            }
+            val script = response.body.trim()
+            if (!looksLikeUserApi(script)) {
+                lastError = if (script.startsWith("<", true)) {
+                    "服务器返回网页而不是脚本（HTTP ${response.code}）"
+                } else {
+                    "返回内容不是有效的 user-api 脚本（HTTP ${response.code}）"
+                }
+                Log.w(TAG, "音源脚本内容无效: $url -> $lastError")
+                continue
+            }
+            Log.i(TAG, "音源脚本下载完成: $url (${script.length} chars)")
+            return script
+        }
+        throw IllegalStateException("脚本下载失败：$lastError")
+    }
+
+    private fun scriptCandidates(url: String): List<String> {
+        val candidates = linkedSetOf(url)
+        val marker = "/raw.githubusercontent.com/"
+        val pathStart = url.indexOf(marker, ignoreCase = true)
+        if (pathStart >= 0) {
+            val suffix = url.substring(pathStart + marker.length)
+            if (suffix.isNotBlank()) {
+                candidates += "https://raw.githubusercontent.com/$suffix"
+                candidates += "https://ghproxy.net/https://raw.githubusercontent.com/$suffix"
+                candidates += "https://ghproxy.net/raw.githubusercontent.com/$suffix"
+                candidates += "https://gh-proxy.com/https://raw.githubusercontent.com/$suffix"
+                candidates += "https://ghfast.top/https://raw.githubusercontent.com/$suffix"
+            }
+        }
+        return candidates.toList()
+    }
+
+    private fun looksLikeUserApi(script: String): Boolean {
+        val text = script.trim()
+        if (text.length < 20) return false
+        if (text.startsWith("<", ignoreCase = true)) return false
+        val sample = text.take(8_000).lowercase()
+        return listOf("@name", "script_name", "event_names", "getmusicurl", "globalthis.lx", "lx.")
+            .any { marker -> sample.contains(marker) }
     }
 
     /**
@@ -189,40 +270,91 @@ class UserApiManager(private val context: Context) {
         val error: String? = null,
     )
 
-    /** 从 user-api 脚本文本识别脚本名（lx-music 约定：头部注释 @name，或常量 SCRIPT_NAME）。识别不到返回 null。 */
+    /** 从 user-api 脚本文本识别脚本名（lx-music 约定：头部注释 @name，或常量 SCRIPT_NAME）。 */
     private fun parseUserApiName(script: String?): String? {
         if (script.isNullOrBlank()) return null
-        fun clean(s: String): String? = s.removeSuffix("*/").trim().ifBlank { null }
         Regex("""@name\s+([^\r\n*]+)""").find(script)?.groupValues?.get(1)
-            ?.let { clean(it)?.let { n -> return n } }
+            ?.let { return normalizeName(it) }
         Regex("""SCRIPT_NAME\s*=\s*['"]([^'"]+)['"]""").find(script)?.groupValues?.get(1)
-            ?.trim()?.ifBlank { null }?.let { return it }
+            ?.let { return normalizeName(it) }
         return null
     }
 
+    private fun normalizeName(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return raw.lineSequence().firstOrNull()
+            ?.removePrefix("@name")
+            ?.removeSuffix("*/")
+            ?.trim()
+            ?.replace(Regex("""\s+"""), " ")
+            ?.take(40)
+            ?.ifBlank { null }
+    }
+
+    /**
+     * 未填写显示名称时的兜底命名顺序：脚本内名称、URL 文件名/仓库目录、首行注释、导入序号。
+     */
+    private fun deriveName(script: String, source: String): String? {
+        parseUserApiName(script)?.let { return it }
+        if (source.startsWith("http://", true) || source.startsWith("https://", true)) {
+            deriveNameFromUrl(source)?.let { return it }
+        }
+        Regex("""(?m)^\s*(?:/\*+|\*|//)\s*(?!@)([^\r\n*]{2,48})""")
+            .find(script.take(2_000))
+            ?.groupValues?.get(1)
+            ?.let { return normalizeName(it) }
+        return null
+    }
+
+    private fun deriveNameFromUrl(url: String): String? = runCatching {
+        val segments = java.net.URI(url).path.orEmpty()
+            .split('/')
+            .filter { it.isNotBlank() }
+        val fileName = segments.lastOrNull()
+            ?.substringBeforeLast('.', missingDelimiterValue = segments.lastOrNull().orEmpty())
+            ?.replace('-', ' ')
+            ?.replace('_', ' ')
+        val generated = if (fileName.isNullOrBlank() || fileName.lowercase() in LOW_VALUE_NAMES) {
+            segments.getOrNull(segments.size - 2)?.replace('-', ' ')?.replace('_', ' ')
+        } else {
+            fileName
+        }
+        normalizeName(generated)
+    }.getOrNull()
+
     fun listApis(): List<ApiInfo> {
-        val scripts = UserApiStore(context).list()
-        val presets = PresetUserApis.list.associateBy { it.id }
-        return apis.map { (id, api) ->
-            val preset = presets[id]
-            val name = preset?.name ?: run {
-                if (id.startsWith("imported_")) {
-                    val idx = id.removePrefix("imported_").toIntOrNull()
-                    parseUserApiName(scripts.getOrNull(idx ?: -1)) ?: "导入 ${idx?.plus(1) ?: id}"
-                } else id
-            }
-            ApiInfo(
-                id = id,
-                name = name,
-                supportSources = api.sourceIds,
-                enabled = prefs.isEnabled(id),
-                active = prefs.getActive() == id,
-                error = api.loadError()
-                    ?.lineSequence()
-                    ?.firstOrNull()
-                    ?.take(120),
+        val entries = UserApiStore(context).listEntries()
+        val result = mutableListOf<ApiInfo>()
+        PresetUserApis.list.forEach { preset ->
+            val api = apis[preset.id]
+            result += ApiInfo(
+                id = preset.id,
+                name = preset.name,
+                supportSources = api?.sourceIds.orEmpty(),
+                enabled = prefs.isEnabled(preset.id),
+                active = prefs.getActive() == preset.id,
+                error = api?.loadError()?.lineSequence()?.firstOrNull()?.take(160)
+                    ?: if (api == null) "脚本未加载" else null,
             )
         }
+        entries.forEachIndexed { index, entry ->
+            val id = "imported_$index"
+            val api = apis[id]
+            val name = normalizeName(entry.name)
+                ?: parseUserApiName(entry.script)
+                ?: "导入 ${index + 1}"
+            result += ApiInfo(
+                id = id,
+                name = name,
+                supportSources = api?.sourceIds.orEmpty(),
+                enabled = prefs.isEnabled(id),
+                active = prefs.getActive() == id,
+                error = importErrors[index]
+                    ?: api?.loadError()?.lineSequence()?.firstOrNull()?.take(160)
+                    ?: if (api == null) "脚本未加载" else null,
+            )
+        }
+        return result
     }
 
     /** 选中某脚本为「优先取流源」（空串 = 自动兜底所有启用源）。 */
@@ -230,14 +362,19 @@ class UserApiManager(private val context: Context) {
 
     fun setEnabled(id: String, on: Boolean) = prefs.setEnabled(id, on)
 
+    /** 重命名已导入脚本；预设脚本名称固定。 */
+    fun renameImported(idx: Int, name: String) {
+        val clean = normalizeName(name) ?: return
+        UserApiStore(context).renameAt(idx, clean)
+    }
+
     /** 删除第 idx 个导入脚本（落盘），随后由调用方 reload。 */
     fun removeImported(idx: Int) {
         val store = UserApiStore(context)
-        val all = store.list().toMutableList()
-        if (idx in all.indices) {
-            all.removeAt(idx)
-            store.saveAll(all)
-        }
+        if (idx !in store.listEntries().indices) return
+        store.removeAt(idx)
+        importErrors.remove(idx)
+        if (prefs.getActive().startsWith("imported_")) prefs.setActive("")
     }
 
     /** 各脚本（预设/导入）支持（上报）的音源 id 列表，便于设置页展示。 */
@@ -261,11 +398,13 @@ class UserApiManager(private val context: Context) {
     fun destroy() {
         apis.values.forEach { it.destroy() }
         apis.clear()
+        importErrors.clear()
         loaded = false
     }
 
     companion object {
         private const val TAG = "UserApiManager"
+        private val LOW_VALUE_NAMES = setOf("latest", "index", "main", "master", "min", "source", "api")
 
         @Volatile
         private var sharedInstance: UserApiManager? = null

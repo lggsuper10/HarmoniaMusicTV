@@ -26,7 +26,7 @@ data class LxResponse(
     val body: Any?, // JSONObject 或 String
 )
 
-/** 脚本通过 lx.send(EVENT_NAMES.init, { sources }) 上报的单个音源元信息。 */
+/** 脚本通过 lx.send(EVENT_NAMES.inited, { sources }) 上报的单个音源元信息。 */
 data class LxSourceMeta(
     val name: String,
     val type: String, // 'music'
