@@ -101,6 +101,7 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
         val ready = withTimeoutOrNull(12_000) { initDeferredLocal.await() }
         if (ready != true) {
             val reason = scriptError ?: "超时或未上报 inited"
+            if (scriptError == null) scriptError = reason
             Log.e(TAG, "脚本初始化未完成: $reason")
         }
     }
@@ -195,8 +196,9 @@ class WebViewJsEngine(private val context: Context) : JsEngine {
     fun handleScriptSend(name: String, dataJson: String) {
         Log.d(TAG, "handleScriptSend name=$name data=${dataJson.take(160)}")
         if (name == "inited" || name == "init") {
-            runCatching { host?.captureSources(JSONObject(dataJson)) }
+            val parsed = runCatching { host?.captureSources(JSONObject(dataJson)) }
                 .onFailure { Log.e(TAG, "解析 inited 音源列表失败", it) }
+            if (parsed.isSuccess) scriptError = null
             initDeferred?.complete(true)
         }
         // updateAlert 等事件可在将来扩展

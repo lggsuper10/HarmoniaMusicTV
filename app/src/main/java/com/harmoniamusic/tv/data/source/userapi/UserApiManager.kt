@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.harmoniamusic.tv.data.net.HttpClient
 import com.harmoniamusic.tv.data.source.MusicItem
+import com.harmoniamusic.tv.data.source.MusicSources
 import com.harmoniamusic.tv.data.store.UserApiPrefs
 import com.harmoniamusic.tv.data.store.UserApiStore
 import kotlinx.coroutines.Dispatchers
@@ -28,12 +29,14 @@ class UserApiManager(private val context: Context) {
     private val initMutex = Mutex()
     private val prefs = UserApiPrefs(context)
     private val importErrors = ConcurrentHashMap<Int, String>()
+    private val presetErrors = ConcurrentHashMap<String, String>()
 
     /** 加载所有预设与用户导入脚本（幂等，并发安全）。每个脚本各起一个 WebView 引擎。 */
     suspend fun init() = withContext(Dispatchers.IO) {
         initMutex.withLock {
             if (loaded) return@withContext
             importErrors.clear()
+            presetErrors.clear()
             // 1) 内置预设（assets 打包，不可被用户修改）
             for (preset in PresetUserApis.list) {
                 runCatching {
@@ -51,6 +54,10 @@ class UserApiManager(private val context: Context) {
                     val api = JsUserApi(preset.id, host, engine)
                     apis[preset.id] = api
                     logLoadedSources(preset.id, api, engine)
+                }.onFailure {
+                    presetErrors[preset.id] = it.message?.lineSequence()?.firstOrNull()?.take(180)
+                        ?: it.javaClass.simpleName
+                    Log.e(TAG, "预设音源加载失败: id=${preset.id}", it)
                 }
             }
             // 2) 用户导入脚本（局域网/扫码导入，落盘于 UserApiStore）
@@ -225,33 +232,98 @@ class UserApiManager(private val context: Context) {
         val providerName: String,
     )
 
-    /** 取流：优先选中的「优先取流源」，再遍历其他启用的脚本；禁用的不参与。 */
-    suspend fun resolveMusicUrl(item: MusicItem, quality: String): StreamResolution? {
+    /** 某次取流尝试的结果，用于在播放失败时说明究竟试过哪些源。 */
+    data class StreamAttempt(
+        val providerName: String,
+        val result: String,
+    )
+
+    data class ResolutionReport(
+        val stream: StreamResolution?,
+        val configuredSourceLabel: String,
+        val attempts: List<StreamAttempt>,
+    )
+
+    /**
+     * 取流：优先选中的「优先取流源」，再遍历其他启用的脚本；禁用的不参与。
+     * 返回值同时带上配置项与尝试记录，供播放页展示可排查的失败原因。
+     */
+    suspend fun resolveMusicUrlReport(item: MusicItem, quality: String): ResolutionReport {
         if (!loaded) init()
         val info = buildMusicInfo(item)
         val active = prefs.getActive()
+        val apiList = listApis()
+        val displayNames = apiList.associate { it.id to it.name }
+        val configuredSourceLabel = active
+            .takeIf { it.isNotBlank() }
+            ?.let { displayNames[it] ?: apiDisplayName(it) }
+            ?: "自动（所有已启用用户源）"
+        val attempts = mutableListOf<StreamAttempt>()
+
+        if (active.isNotBlank() && active !in apis) {
+            val error = apiList.firstOrNull { it.id == active }?.error
+            attempts += StreamAttempt(
+                providerName = configuredSourceLabel,
+                result = error?.lineSequence()?.firstOrNull()?.take(100) ?: "脚本未加载",
+            )
+        }
+
         val ordered = apis.entries.sortedByDescending { it.key == active }
         for ((id, api) in ordered) {
-            if (!prefs.isEnabled(id)) continue
-            if (!api.sourceIds.contains(item.source)) continue
-            val url = normalizeStreamUrl(
-                runCatching { api.getMusicUrl(info, quality) }
-                    .onFailure { Log.w(TAG, "用户 API 取流异常: source=${item.source} api=$id", it) }
-                    .getOrNull(),
-            )
+            val providerName = displayNames[id] ?: apiDisplayName(id)
+            val isPreferred = id == active
+            if (!prefs.isEnabled(id)) {
+                if (isPreferred) attempts += StreamAttempt(providerName, "已停用")
+                continue
+            }
+            if (!api.sourceIds.contains(item.source)) {
+                if (isPreferred) {
+                    val reportedSources = api.sourceIds
+                    val reason = if (reportedSources.isEmpty()) {
+                        val loadError = api.loadError()?.lineSequence()?.firstOrNull()?.take(80)
+                        if (loadError.isNullOrBlank()) "脚本未上报任何音源" else "脚本未上报音源（$loadError）"
+                    } else {
+                        "未上报${MusicSources.displayName(item.source)}音源"
+                    }
+                    attempts += StreamAttempt(
+                        providerName,
+                        reason,
+                    )
+                }
+                continue
+            }
+            val result = runCatching { api.getMusicUrl(info, quality) }
+                .onFailure { Log.w(TAG, "用户 API 取流异常: source=${item.source} api=$id", it) }
+            val url = normalizeStreamUrl(result.getOrNull())
             if (url != null) {
                 val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
                 Log.i(TAG, "用户 API 取流命中: source=${item.source} api=$id host=$host")
-                return StreamResolution(
-                    url = url,
-                    providerId = id,
-                    providerName = apiDisplayName(id),
+                return ResolutionReport(
+                    stream = StreamResolution(
+                        url = url,
+                        providerId = id,
+                        providerName = providerName,
+                    ),
+                    configuredSourceLabel = configuredSourceLabel,
+                    attempts = attempts,
                 )
             }
-            Log.w(TAG, "用户 API 未返回可用地址: source=${item.source} api=$id")
+            val failure = result.exceptionOrNull()?.let {
+                "取流异常（${it.javaClass.simpleName}: ${it.message?.lineSequence()?.firstOrNull().orEmpty()}）"
+            } ?: "未返回可用地址"
+            attempts += StreamAttempt(providerName, failure)
+            Log.w(TAG, "用户 API 未返回可用地址: source=${item.source} api=$id reason=$failure")
         }
-        return null
+        return ResolutionReport(
+            stream = null,
+            configuredSourceLabel = configuredSourceLabel,
+            attempts = attempts,
+        )
     }
+
+    /** 兼容只需要命中的流源的调用方。 */
+    suspend fun resolveMusicUrl(item: MusicItem, quality: String): StreamResolution? =
+        resolveMusicUrlReport(item, quality).stream
 
     /** 兼容只需要 URL 的调用方（如下载）。 */
     suspend fun getMusicUrl(item: MusicItem, quality: String): String? =
@@ -333,7 +405,8 @@ class UserApiManager(private val context: Context) {
                 supportSources = api?.sourceIds.orEmpty(),
                 enabled = prefs.isEnabled(preset.id),
                 active = prefs.getActive() == preset.id,
-                error = api?.loadError()?.lineSequence()?.firstOrNull()?.take(160)
+                error = presetErrors[preset.id]
+                    ?: api?.loadError()?.lineSequence()?.firstOrNull()?.take(160)
                     ?: if (api == null) "脚本未加载" else null,
             )
         }
@@ -399,6 +472,7 @@ class UserApiManager(private val context: Context) {
         apis.values.forEach { it.destroy() }
         apis.clear()
         importErrors.clear()
+        presetErrors.clear()
         loaded = false
     }
 

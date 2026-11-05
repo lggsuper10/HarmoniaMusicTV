@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.harmoniamusic.tv.data.local.LocalMediaResolver
 import com.harmoniamusic.tv.data.queue.PlayQueue
 import com.harmoniamusic.tv.data.repository.MusicRepository
+import com.harmoniamusic.tv.data.repository.PlaybackSourceException
 import com.harmoniamusic.tv.data.source.userapi.UserApiManager
 import com.harmoniamusic.tv.data.source.BoardInfo
 import com.harmoniamusic.tv.data.source.MusicItem
@@ -61,6 +62,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _playbackStreamSource = MutableStateFlow<String?>(null)
     val playbackStreamSource = _playbackStreamSource.asStateFlow()
 
+    /** 面向用户的播放诊断：配置源、尝试结果或播放器错误码。 */
+    private val _playbackErrorDetail = MutableStateFlow("")
+    val playbackErrorDetail = _playbackErrorDetail.asStateFlow()
+
     private var playJob: Job? = null
 
     /**
@@ -78,7 +83,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // ExoPlayer 异步出错（URL 失效/解码失败）时同步到 _playbackError
         viewModelScope.launch {
-            player.error.collect { _playbackError.value = it != null }
+            player.error.collect { detail ->
+                if (detail == null) {
+                    _playbackError.value = false
+                } else {
+                    _playbackError.value = true
+                    val source = _playbackStreamSource.value?.takeIf { it.isNotBlank() }
+                    _playbackErrorDetail.value = buildString {
+                        append("播放器错误")
+                        source?.let { append(" · 实际音源「$it」") }
+                        append(" · ").append(detail)
+                    }
+                }
+            }
         }
         // 曲终自动连播（跳过初始发射的 0）
         viewModelScope.launch {
@@ -804,6 +821,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _lyric.value = ""
         _lyricState.value = LyricLoadState.LOADING
         _playbackError.value = false
+        _playbackErrorDetail.value = ""
         _playbackStreamSource.value = if (item.source == LOCAL_SOURCE) "本地文件" else null
         // 通知 Shell 打开播放页，保证点歌有可见反馈（无论是否真正播放成功）
         _openPlayerSignal.value += 1
@@ -812,6 +830,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { player.play(item.songmid) }
                     .onFailure {
                         _playbackError.value = true
+                        _playbackErrorDetail.value = "本地文件播放失败：${
+                            it.message?.lineSequence()?.firstOrNull() ?: it.javaClass.simpleName
+                        }"
                         Log.e("ZlPlay", "本地播放失败: ${item.name}", it)
                     }
             } else {
@@ -822,6 +843,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     .onFailure {
                         if (token == playToken) {
                             _playbackError.value = true
+                            _playbackErrorDetail.value = if (it is PlaybackSourceException) {
+                                it.diagnostics
+                            } else {
+                                "取流失败：${it.message?.lineSequence()?.firstOrNull() ?: it.javaClass.simpleName}"
+                            }
                             Log.e("ZlPlay", "播放失败: ${item.name} source=${item.source}", it)
                         }
                     }

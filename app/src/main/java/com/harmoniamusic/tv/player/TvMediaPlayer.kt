@@ -57,7 +57,12 @@ class TvMediaPlayer(context: Context) {
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            _error.value = error.message
+            _error.value = buildString {
+                append("code=").append(error.errorCode)
+                error.message?.takeIf { it.isNotBlank() }?.let {
+                    append(" · ").append(it.lineSequence().firstOrNull()?.take(240))
+                }
+            }
         }
     }
 

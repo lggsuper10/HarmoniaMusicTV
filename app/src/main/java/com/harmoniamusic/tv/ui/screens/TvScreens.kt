@@ -765,6 +765,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     val lyricState by vm.lyricState.collectAsState()
     val error by vm.playbackError.collectAsState()
     val playbackStreamSource by vm.playbackStreamSource.collectAsState()
+    val playbackErrorDetail by vm.playbackErrorDetail.collectAsState()
     val mode by vm.playMode.collectAsState()
     val favorites by vm.favorites.collectAsState()
     val userPlaylists by vm.userPlaylists.collectAsState()
@@ -831,7 +832,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
 
     // 来源与播放状态完全分离：来源保持稳定，状态仅在准备/暂停/失败时显示。
     val statusText = when {
-        error -> "无法播放：版权受限或取流失败"
+        error -> "无法播放"
         isPlaying -> ""
         pos > 0 && dur > 0 -> TvText.paused
         else -> TvText.preparing
@@ -943,6 +944,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                         modifier = Modifier.focusRequester(controlsToggleRequester),
                     ) { controlsVisible = !controlsVisible }
                 }
+            }
+
+            if (error && playbackErrorDetail.isNotBlank()) {
+                PlayerPlaybackDiagnostic(playbackErrorDetail)
             }
 
             // 中部：封面 + 歌词
@@ -1405,6 +1410,38 @@ private fun PlayerSourceBadge(label: String) {
             fontSize = tv.tvFont(15),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 播放失败时展示配置源与逐源尝试结果，避免只看到笼统的“取流失败”。 */
+@Composable
+private fun PlayerPlaybackDiagnostic(detail: String) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val shape = RoundedCornerShape(tv.tvSize(10))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colors.surfaceHigh.copy(alpha = 0.62f), shape)
+            .border(1.dp, colors.danger.copy(alpha = 0.42f), shape)
+            .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(8)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "诊断",
+            color = colors.danger,
+            fontSize = tv.tvFont(14),
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.width(tv.tvSize(12)))
+        Text(
+            text = detail,
+            color = colors.subtext,
+            fontSize = tv.tvFont(15),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
     }
 }
