@@ -84,6 +84,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
@@ -93,6 +94,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.harmoniamusic.tv.ui.state.LocalFolder
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextStyle
@@ -123,6 +125,11 @@ import com.harmoniamusic.tv.ui.state.LyricLoadState
 import com.harmoniamusic.tv.ui.state.PlayerViewModel
 import com.harmoniamusic.tv.ui.strings.TvText
 import com.harmoniamusic.tv.ui.strings.PlaylistText
+import com.harmoniamusic.tv.ui.components.TvActionButton
+import com.harmoniamusic.tv.ui.components.TvButtonSize
+import com.harmoniamusic.tv.ui.components.TvButtonSurface
+import com.harmoniamusic.tv.ui.components.TvChoiceChip
+import com.harmoniamusic.tv.ui.components.TvIconButton
 import com.harmoniamusic.tv.ui.theme.LocalTvColors
 import com.harmoniamusic.tv.ui.theme.LocalTvMetrics
 import com.harmoniamusic.tv.ui.theme.tvFont
@@ -252,36 +259,13 @@ private fun HomePill(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    Box(
-        modifier = modifier
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { if (enabled) onClick() }
-            .alpha(if (enabled) 1f else 0.42f)
-            .background(
-                if (focused) colors.surfaceHigh else colors.surface,
-                RoundedCornerShape(tv.tvSize(10)),
-            )
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
-                shape = RoundedCornerShape(tv.tvSize(10)),
-            )
-            .padding(horizontal = tv.tvSize(22), vertical = tv.tvSize(10)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = when {
-                !enabled -> colors.text
-                focused -> Color.White
-                else -> colors.subtext
-            },
-            fontSize = tv.tvFont(20),
-        )
-    }
+    TvActionButton(
+        label = label,
+        modifier = modifier,
+        enabled = enabled,
+        size = TvButtonSize.LARGE,
+        onClick = onClick,
+    )
 }
 
 /** 首页方形图标按钮（搜索入口）。 */
@@ -291,32 +275,11 @@ private fun HomeIconPill(
     description: String,
     onClick: () -> Unit,
 ) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    Box(
-        modifier = Modifier
-            .size(tv.tvSize(58))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(
-                if (focused) colors.surfaceHigh else colors.surface,
-                RoundedCornerShape(tv.tvSize(10)),
-            )
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
-                shape = RoundedCornerShape(tv.tvSize(10)),
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = if (focused) Color.White else colors.subtext,
-            modifier = Modifier.size(tv.tvSize(28)),
-        )
-    }
+    TvIconButton(
+        icon = icon,
+        contentDescription = description,
+        onClick = onClick,
+    )
 }
 
 /** 正在播放时的“跳动音柱”小动画。 */
@@ -412,7 +375,7 @@ private fun PlayerArtwork(url: String?, size: Dp) {
             .size(size)
             .clip(shape)
             .background(colors.bgWarm)
-            .border(1.dp, Color.White.copy(alpha = 0.14f), shape),
+            .border(1.dp, colors.border, shape),
         contentAlignment = Alignment.Center,
     ) {
         if (url.isNullOrBlank()) {
@@ -446,10 +409,17 @@ private fun PlayerArtwork(url: String?, size: Dp) {
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            listOf(
-                                Color.Black.copy(alpha = 0.14f),
-                                Color.Black.copy(alpha = 0.46f),
-                            ),
+                            if (colors.isDark) {
+                                listOf(
+                                    Color.Black.copy(alpha = 0.14f),
+                                    Color.Black.copy(alpha = 0.46f),
+                                )
+                            } else {
+                                listOf(
+                                    Color.White.copy(alpha = 0.18f),
+                                    colors.bgDeep.copy(alpha = 0.76f),
+                                )
+                            },
                         ),
                     ),
             )
@@ -475,12 +445,12 @@ private fun HomePlaylistCard(p: PlaylistInfo, onClick: () -> Unit) {
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
             .background(
-                if (focused) colors.surfaceHigh else Color.Transparent,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else Color.Transparent,
                 RoundedCornerShape(tv.tvSize(14)),
             )
             .border(
                 width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
+                color = colors.selectGreen,
                 shape = RoundedCornerShape(tv.tvSize(14)),
             )
             .padding(tv.tvSize(6)),
@@ -547,7 +517,17 @@ private fun CollectionDetailPane(
         Column(
             modifier = Modifier.width(tv.tvSize(430)).fillMaxHeight(),
         ) {
-            HomePill(TvText.back) { onBack() }
+            HomePill(
+                label = TvText.back,
+                modifier = Modifier.onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                        onBack()
+                        true
+                    } else {
+                        false
+                    }
+                },
+            ) { onBack() }
             Spacer(Modifier.height(tv.tvSize(20)))
             HomeCover(url = state.cover, size = tv.tvSize(300))
             Spacer(Modifier.height(tv.tvSize(18)))
@@ -568,7 +548,17 @@ private fun CollectionDetailPane(
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(tv.tvSize(22)))
-            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
+            Row(
+                modifier = Modifier.onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                        onBack()
+                        true
+                    } else {
+                        false
+                    }
+                },
+                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
+            ) {
                 HomePill(
                     label = TvText.playAll,
                     modifier = Modifier.focusRequester(playAllRequester),
@@ -677,12 +667,12 @@ private fun DetailSongRow(
             }
             .clickable { onClick() }
             .background(
-                if (focused) colors.surfaceHigh else Color.Transparent,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else Color.Transparent,
                 RoundedCornerShape(tv.tvSize(8)),
             )
             .border(
                 width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
+                color = colors.selectGreen,
                 shape = RoundedCornerShape(tv.tvSize(8)),
             )
             .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(10)),
@@ -697,7 +687,7 @@ private fun DetailSongRow(
         Column(Modifier.weight(1f)) {
             Text(
                 text = item.name,
-                color = if (focused) Color.White else colors.text,
+                color = colors.text,
                 fontSize = tv.tvFont(21),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -731,19 +721,19 @@ private fun SongRow(item: MusicItem, onClick: () -> Unit) {
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
             .background(
-                if (focused) colors.surfaceHigh else Color.Transparent,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else Color.Transparent,
                 RoundedCornerShape(tv.tvSize(8)),
             )
             .border(
                 width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
+                color = colors.selectGreen,
                 shape = RoundedCornerShape(tv.tvSize(8)),
             )
             .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(12)),
     ) {
         Text(
             text = "${item.name} - ${item.singer.ifBlank { TvText.unknownSinger }}",
-            color = if (focused) Color.White else colors.subtext,
+            color = if (focused) colors.text else colors.subtext,
             fontSize = tv.tvFont(22),
         )
     }
@@ -775,6 +765,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var interactionTick by remember { mutableStateOf(0) }
     val controlsToggleRequester = remember { FocusRequester() }
+    val density = LocalDensity.current
+    var controlsHeightPx by remember { mutableStateOf(0) }
     var downloadQualityItem by remember { mutableStateOf<MusicItem?>(null) }
     var downloadQualityOptions by remember { mutableStateOf<List<MusicQuality>>(emptyList()) }
     var addToPlaylistSong by remember { mutableStateOf<MusicItem?>(null) }
@@ -863,16 +855,24 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 model = current?.img,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().alpha(0.22f),
+                modifier = Modifier.fillMaxSize().alpha(if (colors.isDark) 0.22f else 0.10f),
             )
             Box(
                 Modifier.fillMaxSize().background(
                     Brush.verticalGradient(
-                        listOf(
-                            Color.Black.copy(alpha = 0.42f),
-                            Color.Black.copy(alpha = 0.66f),
-                            colors.bgDeep.copy(alpha = 0.9f),
-                        ),
+                        if (colors.isDark) {
+                            listOf(
+                                Color.Black.copy(alpha = 0.42f),
+                                Color.Black.copy(alpha = 0.66f),
+                                colors.bgDeep.copy(alpha = 0.9f),
+                            )
+                        } else {
+                            listOf(
+                                Color.White.copy(alpha = 0.72f),
+                                Color.White.copy(alpha = 0.90f),
+                                colors.bgDeep.copy(alpha = 0.97f),
+                            )
+                        },
                     ),
                 ),
             )
@@ -952,7 +952,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
 
             // 中部：封面 + 歌词
             Row(
-                Modifier.weight(1f),
+                Modifier.weight(1f).padding(bottom = tv.tvSize(6)),
                 horizontalArrangement = Arrangement.spacedBy(tv.tvSize(48)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -966,6 +966,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
             }
 
             if (controlsVisible) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onSizeChanged { controlsHeightPx = it.height },
+                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
+                ) {
                 // 进度条（可聚焦，左右方向键快进）
                 SeekBar(
                     positionMs = pos,
@@ -1040,6 +1046,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                         modifier = Modifier.align(Alignment.CenterEnd),
                     ) { onBack() }
                 }
+                }
+            } else if (controlsHeightPx > 0) {
+                // 控制栏隐藏时仍保留相同高度，避免封面和歌词重新居中后下跳。
+                Spacer(Modifier.height(with(density) { controlsHeightPx.toDp() }))
             }
         }
         addToPlaylistSong?.let { song ->
@@ -1123,7 +1133,7 @@ private fun AddToPlaylistDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -1226,7 +1236,7 @@ private fun PlaylistChoiceRow(
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
-            .background(if (focused) colors.surfaceHigh else colors.surface, shape)
+            .background(if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface, shape)
             .border(if (focused) 3.dp else 0.dp, colors.focus, shape)
             .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(8)),
         verticalAlignment = Alignment.CenterVertically,
@@ -1236,7 +1246,7 @@ private fun PlaylistChoiceRow(
         Column(Modifier.weight(1f)) {
             Text(
                 text = playlist.name,
-                color = if (focused) Color.White else colors.text,
+                color = colors.text,
                 fontSize = tv.tvFont(20),
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
@@ -1362,7 +1372,7 @@ private fun DownloadQualityChoice(
             .background(if (focused) colors.selectGreen else colors.surface, shape)
             .border(
                 width = if (focused) 3.dp else 1.dp,
-                color = if (focused) colors.focus else colors.border,
+                color = if (focused) Color.White else colors.border,
                 shape = shape,
             )
             .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(13)),
@@ -1370,7 +1380,7 @@ private fun DownloadQualityChoice(
     ) {
         Text(
             text = label,
-            color = if (focused) colors.bgDeep else colors.text,
+            color = if (focused) Color.White else colors.text,
             fontSize = tv.tvFont(20),
             fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
             modifier = Modifier.weight(1f),
@@ -1378,7 +1388,7 @@ private fun DownloadQualityChoice(
         detail?.let {
             Text(
                 text = it,
-                color = if (focused) colors.bgDeep else colors.dimText,
+                color = if (focused) Color.White.copy(alpha = 0.82f) else colors.dimText,
                 fontSize = tv.tvFont(16),
             )
         }
@@ -1393,8 +1403,8 @@ private fun PlayerSourceBadge(label: String) {
     val shape = RoundedCornerShape(50)
     Row(
         modifier = Modifier
-            .background(Color.Black.copy(alpha = 0.30f), shape)
-            .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
+            .background(colors.glassHigh, shape)
+            .border(1.dp, colors.line, shape)
             .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(7)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1467,7 +1477,7 @@ private fun PlayerInlineAction(label: String, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
-            color = if (focused) colors.bgDeep else colors.text,
+            color = if (focused) Color.White else colors.text,
             fontSize = tv.tvFont(13),
             fontWeight = FontWeight.Bold,
         )
@@ -1529,7 +1539,7 @@ private fun PlayerUtilityButton(
                 imageVector = icon,
                 contentDescription = label,
                 tint = when {
-                    focused -> colors.bgDeep
+                    focused -> Color.White
                     active -> colors.selectGreen
                     else -> colors.subtext
                 },
@@ -1539,7 +1549,7 @@ private fun PlayerUtilityButton(
         Spacer(Modifier.height(tv.tvSize(3)))
         Text(
             text = label,
-            color = if (focused || active) colors.text else colors.dimText,
+            color = if (focused || active) colors.selectGreen else colors.dimText,
             fontSize = tv.tvFont(12),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1570,7 +1580,7 @@ private fun PlayerControlsToggle(
         Icon(
             imageVector = if (visible) Icons.Rounded.ExpandMore else Icons.Rounded.ExpandLess,
             contentDescription = if (visible) "隐藏控制栏" else "显示控制栏",
-            tint = if (focused) colors.bgDeep else colors.subtext,
+            tint = if (focused) Color.White else colors.subtext,
             modifier = Modifier.size(tv.tvSize(30)),
         )
     }
@@ -1787,32 +1797,6 @@ private fun parseLrc(raw: String): List<Pair<Long, String>> {
 }
 
 @Composable
-private fun ControlButton(
-    label: String,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    Box(
-        modifier = modifier
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(colors.surface, RoundedCornerShape(tv.tvSize(10)))
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
-                shape = RoundedCornerShape(tv.tvSize(10)),
-            )
-            .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(12)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = colors.text, fontSize = tv.tvFont(21), maxLines = 1)
-    }
-}
-
-@Composable
 private fun ControlIconButton(
     icon: ImageVector,
     contentDescription: String,
@@ -1849,7 +1833,7 @@ private fun ControlIconButton(
                 .background(
                     when {
                         focused -> colors.selectGreen
-                        primary -> colors.surfaceHigh
+                        primary -> colors.selectGreen.copy(alpha = 0.18f)
                         else -> colors.surface
                     },
                     CircleShape,
@@ -1862,7 +1846,7 @@ private fun ControlIconButton(
                     },
                     color = when {
                         focused -> Color.White
-                        primary -> colors.selectGreen.copy(alpha = 0.58f)
+                        primary -> colors.selectGreen.copy(alpha = 0.70f)
                         else -> Color.White.copy(alpha = 0.10f)
                     },
                     shape = CircleShape,
@@ -1873,7 +1857,7 @@ private fun ControlIconButton(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = when {
-                    focused -> colors.bgDeep
+                    focused -> Color.White
                     primary -> colors.selectGreen
                     else -> colors.subtext
                 },
@@ -1884,7 +1868,7 @@ private fun ControlIconButton(
         Text(
             text = label ?: contentDescription,
             color = when {
-                focused -> Color.White
+                focused -> colors.selectGreen
                 primary -> colors.selectGreen
                 else -> colors.dimText
             },
@@ -1905,7 +1889,8 @@ fun formatTime(ms: Long): String {
 /** 排行榜 Tab：横向榜单预览 + 榜单摘要 + 强化排名的歌曲列表。 */
 @Composable
 fun ChartsScreen(
-    focusTick: Int = 0,
+    focusRequestId: Int = 0,
+    onFocusNav: () -> Unit = {},
     vm: PlayerViewModel = viewModel(),
 ) {
     val colors = LocalTvColors.current
@@ -1931,10 +1916,18 @@ fun ChartsScreen(
     val boardRequesters = remember { mutableMapOf<String, FocusRequester>() }
     val playAllRequester = remember { FocusRequester() }
     var actionFocusTick by remember { mutableStateOf(0) }
+    val upToNav = Modifier.onPreviewKeyEvent { event ->
+        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+            onFocusNav()
+            true
+        } else {
+            false
+        }
+    }
 
     LaunchedEffect(Unit) { vm.loadBoards() }
-    LaunchedEffect(focusTick) {
-        if (focusTick <= 0 || boards.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(focusRequestId) {
+        if (focusRequestId <= 0) return@LaunchedEffect
         withFrameNanos { }
         withFrameNanos { }
         val target = selectedBangid ?: boards.firstOrNull()?.bangid ?: return@LaunchedEffect
@@ -1984,16 +1977,17 @@ fun ChartsScreen(
         Spacer(Modifier.height(tv.tvSize(6)))
 
         when {
-            boardsLoading && boards.isEmpty() -> ChartRailMessage(TvText.loading)
+            boardsLoading && boards.isEmpty() -> ChartRailMessage(TvText.loading, modifier = upToNav)
             boardsError != null && boards.isEmpty() -> ChartRailMessage(
                 message = TvText.loadFailed,
                 actionLabel = TvText.chartRetry,
                 onAction = { vm.loadBoards(force = true) },
+                modifier = upToNav,
             )
-            boards.isEmpty() -> ChartRailMessage(TvText.chartNoBoards)
+            boards.isEmpty() -> ChartRailMessage(TvText.chartNoBoards, modifier = upToNav)
             else -> {
                 LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().then(upToNav),
                     horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
                 ) {
                     itemsIndexed(boards, key = { _, board -> board.bangid }) { index, board ->
@@ -2133,11 +2127,12 @@ private fun ChartRailMessage(
     message: String,
     actionLabel: String? = null,
     onAction: () -> Unit = {},
+    modifier: Modifier = Modifier,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .height(tv.tvSize(84))
             .background(colors.surface, RoundedCornerShape(tv.tvSize(12)))
@@ -2206,7 +2201,7 @@ private fun ChartBoardCard(
             .clickable { onClick() }
             .background(
                 when {
-                    focused -> colors.surfaceHigh
+                    focused -> colors.selectGreen.copy(alpha = 0.16f)
                     selected -> colors.surface
                     else -> Color.Transparent
                 },
@@ -2214,7 +2209,7 @@ private fun ChartBoardCard(
             )
             .then(
                 when {
-                    focused -> Modifier.border(3.dp, colors.focus, shape)
+                    focused -> Modifier.border(3.dp, colors.selectGreen, shape)
                     selected -> Modifier.border(2.dp, colors.selectGreen, shape)
                     else -> Modifier
                 },
@@ -2350,7 +2345,7 @@ private fun ChartSongRow(
             .clickable { onPlay() }
             .background(
                 when {
-                    focused -> colors.surfaceHigh
+                    focused -> colors.selectGreen.copy(alpha = 0.16f)
                     isCurrent -> colors.selectGreen.copy(alpha = 0.1f)
                     else -> Color.Transparent
                 },
@@ -2358,7 +2353,7 @@ private fun ChartSongRow(
             )
             .then(
                 when {
-                    focused -> Modifier.border(3.dp, colors.focus, shape)
+                    focused -> Modifier.border(3.dp, colors.selectGreen, shape)
                     isCurrent -> Modifier.border(1.dp, colors.selectGreen, shape)
                     else -> Modifier
                 },
@@ -2382,7 +2377,7 @@ private fun ChartSongRow(
         Column(Modifier.weight(1f)) {
             Text(
                 text = item.name,
-                color = if (focused) Color.White else colors.text,
+                color = colors.text,
                 fontSize = tv.tvFont(18),
                 fontWeight = if (focused || topThree) FontWeight.Bold else FontWeight.Normal,
                 maxLines = 1,
@@ -2412,7 +2407,10 @@ private fun ChartSongRow(
 
 /** 我的音乐 Tab：收藏集合 + 本地文件夹。播放队列不在这里。 */
 @Composable
-fun MyListScreen(vm: PlayerViewModel = viewModel()) {
+fun MyListScreen(
+    vm: PlayerViewModel = viewModel(),
+    onFocusNav: () -> Unit = {},
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val favorites by vm.favorites.collectAsState()
@@ -2556,7 +2554,17 @@ fun MyListScreen(vm: PlayerViewModel = viewModel()) {
                     fontSize = tv.tvFont(15),
                 )
                 Spacer(Modifier.width(tv.tvSize(16)))
-                HomePill(TvText.manage) { showManager = true }
+                HomePill(
+                    label = TvText.manage,
+                    modifier = Modifier.onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                            onFocusNav()
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                ) { showManager = true }
             }
         }
         item {
@@ -2583,7 +2591,6 @@ fun MyListScreen(vm: PlayerViewModel = viewModel()) {
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.weight(1f))
-                HomePill(PlaylistText.newPlaylist) { showCreatePlaylist = true }
             }
         }
         item {
@@ -2895,8 +2902,8 @@ private fun UserPlaylistCard(
                     else -> false
                 }
             }
-            .background(if (focused) colors.surfaceHigh else colors.surface, shape)
-            .border(if (focused) 3.dp else 0.dp, colors.focus, shape)
+            .background(if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface, shape)
+            .border(if (focused) 3.dp else 0.dp, colors.selectGreen, shape)
             .padding(tv.tvSize(8)),
     ) {
         Box {
@@ -2946,10 +2953,10 @@ private fun AddPlaylistCard(onClick: () -> Unit) {
             .width(tv.tvSize(166))
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
-            .background(if (focused) colors.surfaceHigh else colors.surface, shape)
+            .background(if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface, shape)
             .border(
                 width = if (focused) 3.dp else 2.dp,
-                color = if (focused) colors.focus else colors.border,
+                color = if (focused) colors.selectGreen else colors.border,
                 shape = shape,
             )
             .padding(tv.tvSize(8)),
@@ -2967,7 +2974,7 @@ private fun AddPlaylistCard(onClick: () -> Unit) {
         Spacer(Modifier.height(tv.tvSize(6)))
         Text(
             text = PlaylistText.newPlaylist,
-            color = if (focused) Color.White else colors.text,
+            color = colors.text,
             fontSize = tv.tvFont(18),
             fontWeight = FontWeight.Bold,
             maxLines = 1,
@@ -3034,12 +3041,12 @@ private fun FavoriteCollectionCard(
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
             .background(
-                if (focused) colors.surfaceHigh else colors.surface,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
                 RoundedCornerShape(tv.tvSize(12)),
             )
             .border(
                 width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
+                color = colors.selectGreen,
                 shape = RoundedCornerShape(tv.tvSize(12)),
             )
             .padding(tv.tvSize(8)),
@@ -3144,7 +3151,7 @@ private fun RecentTrackCard(
                 }
             }
             .background(
-                if (focused) colors.surfaceHigh else colors.surface,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
                 cardShape,
             )
             .border(
@@ -3153,7 +3160,7 @@ private fun RecentTrackCard(
                     isCurrent -> 2.dp
                     else -> 0.dp
                 },
-                color = if (focused) colors.focus else colors.selectGreen,
+                color = colors.selectGreen,
                 shape = cardShape,
             )
             .padding(tv.tvSize(6)),
@@ -3235,12 +3242,12 @@ private fun LocalFolderCard(
                 }
             }
             .background(
-                if (focused) colors.surfaceHigh else colors.surface,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
                 RoundedCornerShape(tv.tvSize(12)),
             )
             .border(
                 width = if (focused) 3.dp else 0.dp,
-                color = colors.focus,
+                color = colors.selectGreen,
                 shape = RoundedCornerShape(tv.tvSize(12)),
             )
             .padding(tv.tvSize(8)),
@@ -3280,12 +3287,12 @@ private fun AddFolderCard(onClick: () -> Unit) {
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
             .background(
-                if (focused) colors.surfaceHigh else colors.surface,
+                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
                 RoundedCornerShape(tv.tvSize(12)),
             )
             .border(
                 width = if (focused) 3.dp else 2.dp,
-                color = if (focused) colors.focus else colors.border,
+                color = if (focused) colors.selectGreen else colors.border,
                 shape = RoundedCornerShape(tv.tvSize(12)),
             )
             .padding(tv.tvSize(8)),
@@ -3303,7 +3310,7 @@ private fun AddFolderCard(onClick: () -> Unit) {
         Spacer(Modifier.height(tv.tvSize(6)))
         Text(
             text = TvText.addLocalSongDisk,
-            color = if (focused) Color.White else colors.text,
+            color = colors.text,
             fontSize = tv.tvFont(18),
             fontWeight = FontWeight.Bold,
             maxLines = 1,
@@ -3341,7 +3348,7 @@ private fun LibraryManagerDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -3466,7 +3473,7 @@ private fun FolderActionDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -3529,7 +3536,7 @@ private fun RemoveFolderConfirmDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -3587,7 +3594,7 @@ private fun PlaylistActionDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -3651,7 +3658,7 @@ private fun ConfirmActionDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -3720,7 +3727,7 @@ private fun PlaylistNameDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -3821,7 +3828,10 @@ private fun LocalDirPicker(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = false,
+        ),
     ) {
     Column(modifier = Modifier.fillMaxSize().background(colors.bgDeep).padding(tv.tvSize(60))) {
         Text("选择音乐文件夹", color = colors.text, fontSize = tv.tvFont(32), fontWeight = FontWeight.Bold)
@@ -3862,6 +3872,7 @@ private fun LocalDirPicker(
                     title = dir.name.ifBlank { dir.absolutePath },
                     subtitle = null,
                     modifier = if (opened == null && index == 0) Modifier.focusRequester(firstRequester) else Modifier,
+                    onUp = if (opened == null && index == 0) onDismiss else null,
                 ) { opened = dir }
             }
             if (entries.isEmpty()) {
@@ -3888,6 +3899,7 @@ private fun DirRow(
     title: String,
     subtitle: String?,
     modifier: Modifier = Modifier,
+    onUp: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val colors = LocalTvColors.current
@@ -3897,11 +3909,27 @@ private fun DirRow(
         modifier = modifier
             .fillMaxWidth()
             .onFocusChanged { f = it.isFocused }
+            .onPreviewKeyEvent { event ->
+                if (
+                    onUp != null &&
+                    event.type == KeyEventType.KeyDown &&
+                    event.key == Key.DirectionUp &&
+                    event.nativeKeyEvent.repeatCount == 0
+                ) {
+                    onUp()
+                    true
+                } else {
+                    false
+                }
+            }
             .clickable { onClick() }
-            .background(colors.surface, RoundedCornerShape(tv.tvSize(10)))
+            .background(
+                if (f) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
+                RoundedCornerShape(tv.tvSize(10)),
+            )
             .border(
                 width = if (f) 3.dp else 1.dp,
-                color = if (f) colors.focus else colors.surfaceHigh,
+                color = if (f) colors.selectGreen else colors.surfaceHigh,
                 shape = RoundedCornerShape(tv.tvSize(10)),
             )
             .padding(horizontal = tv.tvSize(24), vertical = tv.tvSize(16)),
@@ -3931,34 +3959,24 @@ private fun hasStoragePermission(context: Context): Boolean =
 
 @Composable
 private fun SettingActionButton(label: String, onClick: () -> Unit) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var f by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(10))
-    Box(
-        modifier = Modifier
-            .onFocusChanged { f = it.isFocused }
-            .clickable { onClick() }
-            .background(if (f) colors.surfaceHigh else colors.surface, shape)
-            .border(if (f) 3.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(24), vertical = tv.tvSize(10)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = if (f) Color.White else colors.subtext,
-            fontSize = tv.tvFont(18),
-        )
-    }
+    TvActionButton(
+        label = label,
+        size = TvButtonSize.REGULAR,
+        onClick = onClick,
+    )
 }
 
 
 /**
  * 搜索页：顶部搜索栏 + 搜索发现 / 大尺寸结果列表 + 按需展开的电视键盘。
- * 进入时优先聚焦搜索框；键盘只在需要输入时占用屏幕空间。
+ * 按 OK/下键进入内容区时聚焦搜索框；键盘只在需要输入时占用屏幕空间。
  */
 @Composable
-fun SearchScreen(vm: PlayerViewModel = viewModel()) {
+fun SearchScreen(
+    vm: PlayerViewModel = viewModel(),
+    focusRequestId: Int = 0,
+    onFocusNav: () -> Unit = {},
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     var text by rememberSaveable { mutableStateOf(String()) }
@@ -4000,7 +4018,8 @@ fun SearchScreen(vm: PlayerViewModel = viewModel()) {
         vm.searchTv(query, 1)
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(focusRequestId) {
+        if (focusRequestId <= 0) return@LaunchedEffect
         if (text.isBlank() && activeQuery.isNotBlank()) text = activeQuery
         withFrameNanos { }
         withFrameNanos { }
@@ -4040,7 +4059,16 @@ fun SearchScreen(vm: PlayerViewModel = viewModel()) {
             .padding(horizontal = tv.tvSize(64), vertical = tv.tvSize(22)),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                        onFocusNav()
+                        true
+                    } else {
+                        false
+                    }
+                },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(tv.tvSize(20)),
         ) {
@@ -4080,6 +4108,7 @@ fun SearchScreen(vm: PlayerViewModel = viewModel()) {
             focusRequester = searchFieldFocus,
             onEdit = { keyboardVisible = true },
             onSubmit = { submit() },
+            onFocusNav = onFocusNav,
         )
         Spacer(Modifier.height(tv.tvSize(16)))
 
@@ -4138,6 +4167,7 @@ private fun SearchInputBar(
     focusRequester: FocusRequester,
     onEdit: () -> Unit,
     onSubmit: () -> Unit,
+    onFocusNav: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
@@ -4145,7 +4175,16 @@ private fun SearchInputBar(
     val shape = RoundedCornerShape(tv.tvSize(16))
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                    onFocusNav()
+                    true
+                } else {
+                    false
+                }
+            },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
     ) {
@@ -4156,7 +4195,7 @@ private fun SearchInputBar(
                 .focusRequester(focusRequester)
                 .onFocusChanged { focused = it.isFocused }
                 .clickable { onEdit() }
-                .background(if (focused) colors.surfaceHigh else colors.surface, shape)
+                .background(if (focused) colors.selectGreen.copy(alpha = 0.12f) else colors.surface, shape)
                 .border(
                     width = if (focused) 2.dp else 1.dp,
                     color = if (focused) colors.selectGreen else colors.border,
@@ -4359,55 +4398,21 @@ private fun SearchSourceChip(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(18))
-    Box(
-        modifier = Modifier
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(
-                when {
-                    selected -> colors.selectGreen
-                    focused -> colors.surfaceHigh
-                    else -> colors.surface
-                },
-                shape,
-            )
-            .border(if (focused) 2.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(17), vertical = tv.tvSize(7)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = if (selected || focused) Color.White else colors.subtext,
-            fontSize = tv.tvFont(16),
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-        )
-    }
+    TvChoiceChip(
+        label = label,
+        selected = selected,
+        compact = true,
+        onClick = onClick,
+    )
 }
 
 @Composable
 private fun SearchTextAction(label: String, onClick: () -> Unit) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(12))
-    Box(
-        modifier = Modifier
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(if (focused) colors.surfaceHigh else colors.surface, shape)
-            .border(if (focused) 2.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(8)),
-    ) {
-        Text(
-            text = label,
-            color = if (focused) Color.White else colors.subtext,
-            fontSize = tv.tvFont(16),
-        )
-    }
+    TvActionButton(
+        label = label,
+        size = TvButtonSize.COMPACT,
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -4442,7 +4447,7 @@ private fun SearchResultCard(
             .clickable { onClick() }
             .background(
                 when {
-                    focused -> colors.surfaceHigh
+                    focused -> colors.selectGreen.copy(alpha = 0.16f)
                     isCurrent -> colors.selectGreen.copy(alpha = 0.1f)
                     else -> colors.surface
                 },
@@ -4451,7 +4456,7 @@ private fun SearchResultCard(
             .border(
                 width = if (focused) 2.dp else 1.dp,
                 color = when {
-                    focused -> colors.focus
+                    focused -> colors.selectGreen
                     isCurrent -> colors.selectGreen
                     else -> colors.line
                 },
@@ -4471,7 +4476,7 @@ private fun SearchResultCard(
         Column(Modifier.weight(1f)) {
             Text(
                 text = item.name,
-                color = if (focused) Color.White else colors.text,
+                color = colors.text,
                 fontSize = tv.tvFont(20),
                 fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
                 maxLines = 1,
@@ -4761,34 +4766,33 @@ private fun SearchDiscoveryButton(
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(10))
-    Row(
-        modifier = modifier
-            .height(tv.tvSize(52))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(if (focused) colors.surfaceHigh else colors.glass, shape)
-            .border(if (focused) 2.dp else 0.dp, colors.focus, shape)
-            .padding(horizontal = tv.tvSize(14)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = leading,
-            color = if (focused) colors.selectGreen else colors.dimText,
-            fontSize = tv.tvFont(13),
-            maxLines = 1,
-            modifier = Modifier.width(tv.tvSize(62)),
-        )
-        Text(
-            text = label,
-            color = if (focused) Color.White else colors.text,
-            fontSize = tv.tvFont(18),
-            fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+    TvButtonSurface(
+        modifier = modifier.height(tv.tvSize(52)),
+        shape = shape,
+        onClick = onClick,
+    ) { focused ->
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = tv.tvSize(14)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = leading,
+                color = if (focused) Color.White.copy(alpha = 0.82f) else colors.dimText,
+                fontSize = tv.tvFont(13),
+                maxLines = 1,
+                modifier = Modifier.width(tv.tvSize(62)),
+            )
+            Text(
+                text = label,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(18),
+                fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 
@@ -5046,7 +5050,7 @@ private fun QueueTrackRow(
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(10))
     val background = when {
-        focused -> colors.surfaceHigh
+        focused -> colors.selectGreen.copy(alpha = 0.16f)
         isCurrent -> colors.primarySoft
         isSelected -> colors.surface
         else -> Color.Transparent
@@ -5067,7 +5071,7 @@ private fun QueueTrackRow(
                     isSelected -> 1.dp
                     else -> 0.dp
                 },
-                color = if (focused) colors.focus else colors.border,
+                color = if (focused) colors.selectGreen else colors.border,
                 shape = shape,
             )
             .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(10)),
@@ -5094,7 +5098,7 @@ private fun QueueTrackRow(
             Text(
                 text = item.name,
                 color = when {
-                    focused -> Color.White
+                    focused -> colors.text
                     isCurrent -> colors.selectGreen
                     else -> colors.text
                 },

@@ -1,8 +1,8 @@
 package com.harmoniamusic.tv.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,10 +20,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -38,7 +42,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -70,15 +73,23 @@ import com.harmoniamusic.tv.data.update.ApkInstaller
 import com.harmoniamusic.tv.data.update.UpdateChecker
 import com.harmoniamusic.tv.data.update.UpdateDownloader
 import com.harmoniamusic.tv.data.update.UpdateInfo
+import com.harmoniamusic.tv.ui.components.TvActionButton
+import com.harmoniamusic.tv.ui.components.TvButtonSurface
+import com.harmoniamusic.tv.ui.components.TvButtonTone
+import com.harmoniamusic.tv.ui.components.TvChoiceChip
 import com.harmoniamusic.tv.ui.state.PlayerViewModel
 import com.harmoniamusic.tv.ui.strings.TvText
+import com.harmoniamusic.tv.ui.theme.AppThemeMode
+import com.harmoniamusic.tv.ui.theme.LocalAppearanceController
 import com.harmoniamusic.tv.ui.theme.LocalTvColors
 import com.harmoniamusic.tv.ui.theme.LocalTvMetrics
+import com.harmoniamusic.tv.ui.theme.ThemeAccent
 import com.harmoniamusic.tv.ui.theme.tvFont
 import com.harmoniamusic.tv.ui.theme.tvSize
 import kotlinx.coroutines.launch
 
 private enum class SettingsCategory(val title: String, val subtitle: String) {
+    APPEARANCE("外观", "深色 / 浅色模式与交互主题色"),
     SOURCES("音源与取流", "歌曲目录源与音频取流源分开管理，状态清楚可见"),
     PLAYBACK("播放与下载", "下载任务、保存位置与取流回退策略"),
     UPDATE("应用更新", "检查并安装新的 HarmoniaMusic TV"),
@@ -90,9 +101,15 @@ private enum class SettingsCategory(val title: String, val subtitle: String) {
  * 聚焦态才使用绿色实底，选中态只保留描边与色条，避免整页同时出现多个绿色块。
  */
 @Composable
-fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit = {}) {
+fun SettingsScreen(
+    vm: PlayerViewModel = viewModel(),
+    focusRequestId: Int = 0,
+    onFocusNav: () -> Unit = {},
+    onOpenDownload: () -> Unit = {},
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
+    val appearance = LocalAppearanceController.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val userApiStore = remember { UserApiStore(context) }
@@ -101,9 +118,10 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
     var activeUserApi by remember { mutableStateOf(userApiPrefs.getActive()) }
     var userApiCards by remember { mutableStateOf(vm.userApiList()) }
     var importCount by remember { mutableStateOf(userApiStore.listEntries().size) }
-    var categoryKey by rememberSaveable { mutableStateOf(SettingsCategory.SOURCES.name) }
+    var categoryKey by rememberSaveable { mutableStateOf(SettingsCategory.entries.first().name) }
+    var contentFocused by remember { mutableStateOf(false) }
     val category = SettingsCategory.values().firstOrNull { it.name == categoryKey }
-        ?: SettingsCategory.SOURCES
+        ?: SettingsCategory.entries.first()
 
     var showImportDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<UserApiManager.ApiInfo?>(null) }
@@ -125,7 +143,19 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
     val isTestingSource by vm.isTesting.collectAsState()
     val version = remember { UpdateChecker.currentVersion(context) }
     val contentState = rememberLazyListState()
-    val firstNavRequester = remember { FocusRequester() }
+    val categoryRequesters = remember {
+        SettingsCategory.entries.associateWith { FocusRequester() }
+    }
+
+    fun focusCurrentCategory() {
+        runCatching {
+            categoryRequesters.getValue(category).requestFocus()
+        }
+    }
+
+    BackHandler(enabled = contentFocused) {
+        focusCurrentCategory()
+    }
 
     fun showResult(message: String, failed: Boolean = false) {
         operationMessage = message
@@ -162,9 +192,12 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
         userApiCards = vm.ensureUserApiLoaded()
         activeUserApi = userApiPrefs.getActive()
         importCount = userApiStore.listEntries().size
+    }
+    LaunchedEffect(focusRequestId) {
+        if (focusRequestId <= 0) return@LaunchedEffect
         withFrameNanos { }
         withFrameNanos { }
-        runCatching { firstNavRequester.requestFocus() }
+        focusCurrentCategory()
     }
     LaunchedEffect(category) {
         if (contentState.layoutInfo.totalItemsCount > 0) contentState.scrollToItem(0)
@@ -245,7 +278,9 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                     title = item.title,
                     selected = category == item,
                     onClick = { categoryKey = item.name },
-                    focusRequester = if (index == 0) firstNavRequester else null,
+                    onFocused = { categoryKey = item.name },
+                    focusRequester = categoryRequesters.getValue(item),
+                    onUpToNav = if (index == 0) onFocusNav else null,
                 )
                 Spacer(Modifier.height(tv.tvSize(10)))
             }
@@ -273,7 +308,12 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
             }
         }
 
-        Column(Modifier.weight(1f).fillMaxHeight()) {
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .onFocusChanged { contentFocused = it.hasFocus },
+        ) {
             Row(verticalAlignment = Alignment.Bottom) {
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -305,15 +345,15 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                         item {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12))) {
                                 item {
-                                    SettingsSourceChip(
-                                        title = "聚合音源",
+                                    TvChoiceChip(
+                                        label = "聚合音源",
                                         selected = activeSource == SourceStore.AGGREGATE,
                                         onClick = { vm.setActiveSource(SourceStore.AGGREGATE) },
                                     )
                                 }
                                 items(MusicSources.builtin.keys.toList(), key = { it }) { id ->
-                                    SettingsSourceChip(
-                                        title = MusicSources.displayName(id),
+                                    TvChoiceChip(
+                                        label = MusicSources.displayName(id),
                                         selected = activeSource == id,
                                         onClick = { vm.setActiveSource(id) },
                                     )
@@ -363,7 +403,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                             item {
                                 Text(
                                     message,
-                                    color = if (operationFailed) colors.danger else colors.selectGreen,
+                                    color = if (operationFailed) colors.danger else colors.green,
                                     fontSize = tv.tvFont(17),
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
@@ -377,10 +417,10 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                             )
                         }
                         item {
-                            SettingsPillButton(
+                            TvActionButton(
                                 label = if (isTestingSource) "测试中…" else "测试所有源",
                                 enabled = !isTestingSource,
-                                primary = true,
+                                tone = TvButtonTone.PRIMARY,
                                 onClick = { vm.testSources() },
                             )
                         }
@@ -403,7 +443,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                                 Spacer(Modifier.height(tv.tvSize(5)))
                                 Text("保存位置、任务进度与已完成记录都在这里。", color = colors.dimText, fontSize = tv.tvFont(16))
                                 Spacer(Modifier.height(tv.tvSize(14)))
-                                SettingsPillButton(TvText.downloadManage, primary = true) { onOpenDownload() }
+                                TvActionButton(TvText.downloadManage, tone = TvButtonTone.PRIMARY) { onOpenDownload() }
                             }
                         }
                         item {
@@ -428,6 +468,50 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                         }
                     }
 
+                    SettingsCategory.APPEARANCE -> {
+                        item {
+                            SettingsSectionTitle(
+                                "显示模式",
+                                "深色与浅色会立即切换，并作用于播放页和歌词页；重启后保留。",
+                            )
+                        }
+                        item {
+                            Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
+                                TvChoiceChip(
+                                    label = "深色模式",
+                                    selected = appearance.mode == AppThemeMode.DARK,
+                                    onClick = { appearance.selectMode(AppThemeMode.DARK) },
+                                )
+                                TvChoiceChip(
+                                    label = "浅色模式",
+                                    selected = appearance.mode == AppThemeMode.LIGHT,
+                                    onClick = { appearance.selectMode(AppThemeMode.LIGHT) },
+                                )
+                            }
+                        }
+                        item {
+                            SettingsSectionTitle(
+                                "主题色",
+                                "按钮、聚焦状态和选中状态统一使用该颜色；成功、警告和删除保留语义色。",
+                            )
+                        }
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
+                            ) {
+                                ThemeAccent.entries.forEach { accent ->
+                                    SettingsThemeColorChip(
+                                        accent = accent,
+                                        mode = appearance.mode,
+                                        selected = appearance.accent == accent,
+                                        onClick = { appearance.selectAccent(accent) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     SettingsCategory.UPDATE -> {
                         item {
                             SettingsSectionTitle("版本更新", "从 GitHub Release 检查并安装新版本。")
@@ -440,13 +524,13 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                                         Spacer(Modifier.height(tv.tvSize(4)))
                                         Text("当前版本 v$version", color = colors.dimText, fontSize = tv.tvFont(16))
                                     }
-                                    SettingsStatusBadge("已安装", colors.selectGreen)
+                                    SettingsStatusBadge("已安装", colors.green)
                                 }
                                 Spacer(Modifier.height(tv.tvSize(16)))
-                                SettingsPillButton(
+                                TvActionButton(
                                     label = if (checking) "检查中…" else "检查更新",
                                     enabled = !checking && !downloading,
-                                    primary = true,
+                                    tone = TvButtonTone.PRIMARY,
                                 ) {
                                     checking = true
                                     updateMsg = "正在检查更新…"
@@ -465,7 +549,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                         }
                         updateInfo?.let { info ->
                             item {
-                                SettingsPillButton(
+                                TvActionButton(
                                     label = if (downloading) "下载中 $updateProgress%" else "下载并安装 v${info.version}",
                                     enabled = !downloading,
                                 ) {
@@ -485,7 +569,7 @@ fun SettingsScreen(vm: PlayerViewModel = viewModel(), onOpenDownload: () -> Unit
                             }
                         }
                         updateMsg?.let { message ->
-                            item { Text(message, color = colors.selectGreen, fontSize = tv.tvFont(17)) }
+                            item { Text(message, color = colors.green, fontSize = tv.tvFont(17)) }
                         }
                     }
 
@@ -529,52 +613,62 @@ private fun SettingsNavItem(
     title: String,
     selected: Boolean,
     onClick: () -> Unit,
+    onFocused: () -> Unit = {},
     focusRequester: FocusRequester? = null,
+    onUpToNav: (() -> Unit)? = null,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(12))
-    Row(
+    TvButtonSurface(
         modifier = Modifier
             .fillMaxWidth()
             .height(tv.tvSize(62))
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(
-                when {
-                    focused -> colors.selectGreen
-                    selected -> colors.surfaceHigh
-                    else -> Color.Transparent
-                },
-                shape,
-            )
-            .border(if (focused) 3.dp else 0.dp, colors.focus, shape)
-            .padding(end = tv.tvSize(18)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .width(tv.tvSize(4))
-                .height(tv.tvSize(28))
-                .background(
-                    if (selected && !focused) colors.selectGreen else Color.Transparent,
-                    RoundedCornerShape(tv.tvSize(2)),
-                ),
-        )
-        Spacer(Modifier.width(tv.tvSize(18)))
-        Text(
-            text = title,
-            color = when {
-                focused -> Color(0xFF06130B)
-                selected -> colors.text
-                else -> colors.subtext
+            .onFocusChanged { if (it.isFocused) onFocused() }
+            .onPreviewKeyEvent { event ->
+                val handler = onUpToNav
+                if (handler != null && event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
+                    handler()
+                    true
+                } else {
+                    false
+                }
             },
-            fontSize = tv.tvFont(21),
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            maxLines = 1,
-        )
+        shape = shape,
+        selected = selected,
+        onClick = onClick,
+    ) { focused ->
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(end = tv.tvSize(18)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .width(tv.tvSize(4))
+                    .height(tv.tvSize(28))
+                    .background(
+                        when {
+                            selected && focused -> Color.Transparent
+                            selected -> colors.selectGreen
+                            else -> Color.Transparent
+                        },
+                        RoundedCornerShape(tv.tvSize(2)),
+                    ),
+            )
+            Spacer(Modifier.width(tv.tvSize(18)))
+            Text(
+                text = title,
+                color = when {
+                    focused -> Color.White
+                    selected -> colors.selectGreen
+                    else -> colors.subtext
+                },
+                fontSize = tv.tvFont(21),
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -607,66 +701,6 @@ private fun SettingsCard(
 }
 
 @Composable
-private fun SettingsPillButton(
-    label: String,
-    modifier: Modifier = Modifier,
-    primary: Boolean = false,
-    danger: Boolean = false,
-    enabled: Boolean = true,
-    onClick: () -> Unit,
-) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(10))
-    val pressable = if (enabled) {
-        Modifier.onFocusChanged { focused = it.isFocused }.clickable { onClick() }
-    } else {
-        Modifier
-    }
-    Box(
-        modifier = modifier
-            .then(pressable)
-            .alpha(if (enabled) 1f else 0.42f)
-            .height(tv.tvSize(52))
-            .background(
-                when {
-                    focused -> colors.selectGreen
-                    primary -> colors.selectGreen.copy(alpha = 0.13f)
-                    else -> colors.surfaceHigh
-                },
-                shape,
-            )
-            .border(
-                width = if (focused) 3.dp else 1.dp,
-                color = when {
-                    focused -> colors.focus
-                    primary -> colors.selectGreen.copy(alpha = 0.55f)
-                    danger -> colors.danger.copy(alpha = 0.45f)
-                    else -> Color.Transparent
-                },
-                shape = shape,
-            )
-            .padding(horizontal = tv.tvSize(20)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = when {
-                !enabled -> colors.muted
-                focused -> Color(0xFF06130B)
-                danger -> colors.danger
-                primary -> colors.selectGreen
-                else -> colors.subtext
-            },
-            fontSize = tv.tvFont(17),
-            fontWeight = if (primary || focused) FontWeight.Bold else FontWeight.Medium,
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
 private fun SettingsStatusBadge(label: String, color: Color) {
     val tv = LocalTvMetrics.current
     Box(
@@ -686,47 +720,51 @@ private fun SettingsStatusBadge(label: String, color: Color) {
 }
 
 @Composable
-private fun SettingsSourceChip(title: String, selected: Boolean, onClick: () -> Unit) {
+private fun SettingsThemeColorChip(
+    accent: ThemeAccent,
+    mode: AppThemeMode,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(11))
-    Box(
-        modifier = Modifier
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .height(tv.tvSize(56))
-            .background(
-                when {
-                    focused -> colors.selectGreen
-                    selected -> colors.selectGreen.copy(alpha = 0.12f)
-                    else -> colors.surface
-                },
-                shape,
+    val swatch = accent.colorFor(mode)
+    val shape = RoundedCornerShape(tv.tvSize(12))
+    TvButtonSurface(
+        shape = shape,
+        selected = selected,
+        onClick = onClick,
+    ) { focused ->
+        Column(
+            modifier = Modifier.padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(10)),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                modifier = Modifier.size(tv.tvSize(30)).background(swatch, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (selected) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(tv.tvSize(18)),
+                    )
+                }
+            }
+            Spacer(Modifier.height(tv.tvSize(5)))
+            Text(
+                text = accent.label,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(16),
+                fontWeight = FontWeight.Bold,
             )
-            .border(
-                width = if (focused) 3.dp else if (selected) 2.dp else 1.dp,
-                color = when {
-                    focused -> colors.focus
-                    selected -> colors.selectGreen.copy(alpha = 0.55f)
-                    else -> colors.border
-                },
-                shape = shape,
+            Text(
+                text = if (selected) "当前" else "",
+                color = if (focused) Color.White.copy(alpha = 0.82f) else swatch,
+                fontSize = tv.tvFont(12),
             )
-            .padding(horizontal = tv.tvSize(22)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = title,
-            color = when {
-                focused -> Color(0xFF06130B)
-                selected -> colors.selectGreen
-                else -> colors.subtext
-            },
-            fontSize = tv.tvFont(17),
-            fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Medium,
-            maxLines = 1,
-        )
+        }
     }
 }
 
@@ -734,7 +772,7 @@ private fun SettingsSourceChip(title: String, selected: Boolean, onClick: () -> 
 private fun SettingsSourceTestRow(result: MusicSources.SourceTestResult, displayName: String) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    val statusColor = if (result.ok) colors.selectGreen else colors.danger
+    val statusColor = if (result.ok) colors.green else colors.danger
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -774,7 +812,7 @@ private fun SettingsImportCard(
                 Spacer(Modifier.height(tv.tvSize(4)))
                 Text("支持脚本 URL 或完整内容；已导入 $importCount 个", color = colors.dimText, fontSize = tv.tvFont(16))
             }
-            SettingsStatusBadge("名称可选", colors.selectGreen)
+            SettingsStatusBadge("名称可选", colors.green)
         }
         Spacer(Modifier.height(tv.tvSize(7)))
         Text(
@@ -784,13 +822,13 @@ private fun SettingsImportCard(
         )
         Spacer(Modifier.height(tv.tvSize(14)))
         Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12))) {
-            SettingsPillButton("链接 / 脚本导入", primary = true, onClick = onOpenImport)
-            SettingsPillButton(if (lanUrl == null) "手机导入" else "停止手机导入", onClick = onToggleLan)
+            TvActionButton("链接 / 脚本导入", tone = TvButtonTone.PRIMARY, onClick = onOpenImport)
+            TvActionButton(if (lanUrl == null) "手机导入" else "停止手机导入", onClick = onToggleLan)
         }
         if (lanUrl != null) {
             Spacer(Modifier.height(tv.tvSize(12)))
             Text("在手机浏览器打开", color = colors.dimText, fontSize = tv.tvFont(15))
-            Text(lanUrl, color = colors.selectGreen, fontSize = tv.tvFont(18), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(lanUrl, color = colors.green, fontSize = tv.tvFont(18), maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -818,7 +856,7 @@ private fun UserApiSettingCard(
         !info.enabled -> colors.dimText
         info.error != null -> colors.danger
         !usable -> colors.warn
-        info.active -> colors.selectGreen
+        info.active -> colors.green
         else -> colors.primary
     }
     SettingsCard {
@@ -860,16 +898,16 @@ private fun UserApiSettingCard(
         }
         Spacer(Modifier.height(tv.tvSize(14)))
         Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(10))) {
-            SettingsPillButton(if (info.enabled) "停用" else "启用", onClick = onToggle)
-            SettingsPillButton(
+            TvActionButton(if (info.enabled) "停用" else "启用", onClick = onToggle)
+            TvActionButton(
                 label = if (info.active) "当前取流" else "设为当前",
-                primary = !info.active,
+                tone = if (info.active) TvButtonTone.NEUTRAL else TvButtonTone.PRIMARY,
                 enabled = !info.active && info.enabled && usable,
                 onClick = onActivate,
             )
             if (imported) {
-                SettingsPillButton("重命名", onClick = onRename)
-                SettingsPillButton("删除", danger = true, onClick = onDelete)
+                TvActionButton("重命名", onClick = onRename)
+                TvActionButton("删除", tone = TvButtonTone.DANGER, onClick = onDelete)
             }
         }
     }
@@ -925,7 +963,7 @@ private fun UserApiImportDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.74f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -989,15 +1027,15 @@ private fun UserApiImportDialog(
                 }
                 if (busy) {
                     Spacer(Modifier.height(tv.tvSize(10)))
-                    Text("正在下载并验证脚本…", color = colors.selectGreen, fontSize = tv.tvFont(16))
+                    Text("正在下载并验证脚本…", color = colors.green, fontSize = tv.tvFont(16))
                 }
 
                 Spacer(Modifier.height(tv.tvSize(24)))
                 Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
-                    SettingsPillButton("取消", enabled = !busy) { onDismiss() }
-                    SettingsPillButton(
+                    TvActionButton("取消", enabled = !busy) { onDismiss() }
+                    TvActionButton(
                         label = if (busy) "导入中…" else "验证并导入",
-                        primary = true,
+                        tone = TvButtonTone.PRIMARY,
                         enabled = !busy,
                         onClick = { submit() },
                     )
@@ -1039,7 +1077,7 @@ private fun UserApiRenameDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.74f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -1064,8 +1102,8 @@ private fun UserApiRenameDialog(
                 )
                 Spacer(Modifier.height(tv.tvSize(22)))
                 Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
-                    SettingsPillButton("取消") { onDismiss() }
-                    SettingsPillButton("保存", primary = true, enabled = name.isNotBlank()) { submit() }
+                    TvActionButton("取消") { onDismiss() }
+                    TvActionButton("保存", tone = TvButtonTone.PRIMARY, enabled = name.isNotBlank()) { submit() }
                 }
             }
         }
@@ -1093,7 +1131,7 @@ private fun SettingsConfirmDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.74f)),
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -1108,8 +1146,8 @@ private fun SettingsConfirmDialog(
                 Text(message, color = colors.subtext, fontSize = tv.tvFont(18), maxLines = 4, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(tv.tvSize(26)))
                 Row(horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14))) {
-                    SettingsPillButton("取消", modifier = Modifier.focusRequester(cancelRequester)) { onDismiss() }
-                    SettingsPillButton(confirmLabel, danger = true) { onConfirm() }
+                    TvActionButton("取消", modifier = Modifier.focusRequester(cancelRequester)) { onDismiss() }
+                    TvActionButton(confirmLabel, tone = TvButtonTone.DANGER) { onConfirm() }
                 }
             }
         }

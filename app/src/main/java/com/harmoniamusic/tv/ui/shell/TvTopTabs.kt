@@ -1,5 +1,7 @@
 package com.harmoniamusic.tv.ui.shell
 
+import com.harmoniamusic.tv.R
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -22,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -33,10 +37,13 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import com.harmoniamusic.tv.ui.theme.LocalTvColors
 import com.harmoniamusic.tv.ui.theme.LocalTvMetrics
 import com.harmoniamusic.tv.ui.theme.tvFont
 import com.harmoniamusic.tv.ui.theme.tvSize
+import androidx.compose.ui.res.stringResource
 
 /**
  * 顶栏 Tab 条。方向键在 Tab 上直接切页，OK 才把焦点送进内容区。
@@ -67,8 +74,18 @@ fun TvTopTabs(
             .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(18)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Image(
+            painter = painterResource(R.drawable.app_logo_mark_square),
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .size(tv.tvSize(38))
+                .clip(RoundedCornerShape(tv.tvSize(9)))
+                .border(1.dp, colors.border, RoundedCornerShape(tv.tvSize(9))),
+        )
+        Spacer(Modifier.width(tv.tvSize(12)))
         Text(
-            text = "HarmoniaMusic",
+            text = stringResource(R.string.brand_name),
             color = colors.text,
             fontSize = tv.tvFont(30),
             fontWeight = FontWeight.Bold,
@@ -150,43 +167,19 @@ private fun TopTabItem(
                 onSelect(tab)
                 onConfirm(tab)
             }
-            .background(
-                when {
-                    focused -> colors.surfaceHigh
-                    selected -> colors.selectGreen.copy(alpha = 0.16f)
-                    else -> Color.Transparent
-                },
-                shape,
-            )
-            .border(
-                width = if (focused) 2.dp else 0.dp,
-                color = colors.focus,
-                shape = shape,
-            )
+            .background(if (focused) colors.selectGreen else Color.Transparent, shape)
             .padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(10)),
         contentAlignment = Alignment.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = tab.label,
-                color = when {
-                    focused -> Color.White
-                    selected -> colors.selectGreen
-                    else -> colors.subtext
-                },
-                fontSize = tv.tvFont(18),
-                fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Normal,
-            )
-            Spacer(Modifier.height(tv.tvSize(5)))
-            Box(
-                Modifier
-                    .width(tv.tvSize(28))
-                    .height(tv.tvSize(3))
-                    .background(
-                        if (selected) colors.selectGreen else Color.Transparent,
-                        RoundedCornerShape(tv.tvSize(2)),
-                    ),
-            )
-        }
+        Text(
+            text = tab.label,
+            color = when {
+                focused -> Color.White
+                selected -> colors.selectGreen
+                else -> colors.subtext
+            },
+            fontSize = tv.tvFont(18),
+            fontWeight = if (selected || focused) FontWeight.Bold else FontWeight.Normal,
+        )
     }
 }

@@ -1,4 +1,4 @@
-package com.harmoniamusic.tv.ui.theme
+﻿package com.harmoniamusic.tv.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.Color
  * rgba 已转换为 ARGB（0xAARRGGBB）。
  */
 data class TvColorScheme(
+    val isDark: Boolean,
     val bg: Color,
     val bgDeep: Color,
     val bgWarm: Color,
@@ -41,6 +42,7 @@ data class TvColorScheme(
 )
 
 val darkTvColors = TvColorScheme(
+    isDark = true,
     bg = Color(0xFF0A0D15),
     bgDeep = Color(0xFF060810),
     bgWarm = Color(0xFF111827),
@@ -62,8 +64,8 @@ val darkTvColors = TvColorScheme(
     purple = Color(0xFFB8A6FF),
     orange = Color(0xFFF1C36D),
     green = Color(0xFF77D9A8),
-    selectGreen = Color(0xFF07C160),
-    selectGreenFocus = Color(0xFF0BD874),
+    selectGreen = Color(0xFFE53935),
+    selectGreenFocus = Color(0xFFD32F2F),
     danger = Color(0xFFFF6B6B),
     warn = Color(0xFFF1C36D),
     muted = Color(0xFF646B78),
@@ -73,3 +75,54 @@ val darkTvColors = TvColorScheme(
     lyricDim = Color(0x61F7F8FB),
     lyricActive = Color(0xFFFFFFFF),
 )
+
+/** 纯白浅色底：背景保持纯白，仅用浅灰表面和边框区分层级。 */
+val lightTvColors = TvColorScheme(
+    isDark = false,
+    bg = Color(0xFFFFFFFF),
+    bgDeep = Color(0xFFFFFFFF),
+    bgWarm = Color(0xFFF5F6F8),
+    bgElevated = Color(0xF2FFFFFF),
+    surface = Color(0x0D000000),
+    surfaceHigh = Color(0x1A000000),
+    surfaceWarm = Color(0x14000000),
+    surfaceRed = Color(0x14D32F2F),
+    glass = Color(0x0A000000),
+    glassHigh = Color(0x14000000),
+    text = Color(0xFF17191F),
+    subtext = Color(0xFF505762),
+    dimText = Color(0xFF737B87),
+    primary = Color(0xFFD32F2F),
+    primaryHigh = Color(0xFFB71C1C),
+    focus = Color(0xFF17191F),
+    primarySoft = Color(0x1FD32F2F),
+    blue = Color(0xFF1565C0),
+    purple = Color(0xFF6A1B9A),
+    orange = Color(0xFFB45309),
+    green = Color(0xFF087F4A),
+    selectGreen = Color(0xFFD32F2F),
+    selectGreenFocus = Color(0xFFC62828),
+    danger = Color(0xFFC62828),
+    warn = Color(0xFFA15C00),
+    muted = Color(0xFF9AA1AC),
+    border = Color(0x1F000000),
+    line = Color(0x14000000),
+    overlay = Color(0xD9FFFFFF),
+    lyricDim = Color(0x6617191F),
+    lyricActive = Color(0xFF111318),
+)
+
+/** 根据深浅模式与主题色生成完整的 TV 色板。 */
+fun buildTvColorScheme(mode: AppThemeMode, accent: ThemeAccent): TvColorScheme {
+    val base = if (mode == AppThemeMode.DARK) darkTvColors else lightTvColors
+    val accentColor = accent.colorFor(mode)
+    val softAlpha = if (mode == AppThemeMode.DARK) 0.20f else 0.12f
+    return base.copy(
+        primary = accentColor,
+        primaryHigh = accentColor,
+        primarySoft = accentColor.copy(alpha = softAlpha),
+        selectGreen = accentColor,
+        selectGreenFocus = accentColor,
+        surfaceRed = accentColor.copy(alpha = if (mode == AppThemeMode.DARK) 0.22f else 0.12f),
+    )
+}

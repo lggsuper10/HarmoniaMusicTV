@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,9 +27,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.harmoniamusic.tv.ui.components.TvActionButton
+import com.harmoniamusic.tv.ui.components.TvButtonSize
+import com.harmoniamusic.tv.ui.components.TvButtonTone
 import com.harmoniamusic.tv.ui.screens.ChartsScreen
 import com.harmoniamusic.tv.ui.screens.HomeScreen
 import com.harmoniamusic.tv.ui.screens.MyListScreen
@@ -76,6 +77,10 @@ fun TvShell() {
     var navActive by remember { mutableStateOf(false) }
     val navFocusRequester = remember { FocusRequester() }
 
+    fun focusTopNav() {
+        runCatching { navFocusRequester.requestFocus() }
+    }
+
     // 点歌（play/playList/next/prev）都会发出信号，自动打开播放页，
     // 保证即使取流失败也有可见反馈，而不是“点击没反应”。
     LaunchedEffect(openPlayerSignal) {
@@ -83,11 +88,22 @@ fun TvShell() {
         showPlayer = true
     }
 
-    // 在顶栏按 OK 时把焦点送进内容区，避免用户以为已选中内容区按钮
-    var contentFocusTick by remember { mutableStateOf(0) }
+    // 顶部导航左右键只切 Tab；只有 OK/下键才发一次进入内容区的焦点请求。
+    var contentFocusRequest by remember { mutableStateOf<ContentFocusRequest?>(null) }
+    var contentFocusSeq by remember { mutableStateOf(0) }
     val contentRequester = remember { FocusRequester() }
-    LaunchedEffect(contentFocusTick) {
-        if (contentFocusTick == 0) return@LaunchedEffect
+
+    fun requestContentFocus(tab: TvTab) {
+        contentFocusSeq += 1
+        contentFocusRequest = ContentFocusRequest(tab, contentFocusSeq)
+    }
+
+    fun focusRequestFor(tab: TvTab): Int =
+        contentFocusRequest?.takeIf { it.tab == tab }?.id ?: 0
+
+    LaunchedEffect(contentFocusRequest) {
+        val request = contentFocusRequest ?: return@LaunchedEffect
+        if (request.tab != TvTab.HOME && request.tab != TvTab.MYLIST) return@LaunchedEffect
         withFrameNanos { }
         withFrameNanos { }
         runCatching { contentRequester.requestFocus() }
@@ -108,13 +124,13 @@ fun TvShell() {
 
     BackHandler {
         when {
+            showExitDialog -> showExitDialog = false
             showPlayer -> showPlayer = false
             showDownload -> showDownload = false
             playlistTitle.isNotBlank() -> vm.closePlaylist()
-            showExitDialog -> showExitDialog = false
             // 焦点在内容区：返回先把焦点移回顶部导航（停留在当前 Tab，例如“搜索”按钮），
             // 不切换页面；焦点已在导航上：再次返回才弹退出确认。避免误触直接退出，也避免跳回“推荐”。
-            !navActive -> runCatching { navFocusRequester.requestFocus() }
+            !navActive -> focusTopNav()
             else -> showExitDialog = true
         }
     }
@@ -123,8 +139,11 @@ fun TvShell() {
         if (!overlayVisible) Column(modifier = Modifier.fillMaxSize()) {
             TvTopTabs(
                 selected = selectedTab,
-                onSelect = { selectedTab = it },
-                onConfirm = { contentFocusTick++ },
+                onSelect = {
+                    contentFocusRequest = null
+                    selectedTab = it
+                },
+                onConfirm = { requestContentFocus(it) },
                 navFocusRequester = navFocusRequester,
                 onNavFocusChanged = { navActive = it },
             )
@@ -146,13 +165,23 @@ fun TvShell() {
                         TvTab.HOME -> HomeScreen(
                             onOpenSearch = {
                                 selectedTab = TvTab.SEARCH
-                                contentFocusTick++
+                                requestContentFocus(TvTab.SEARCH)
                             },
                         )
-                        TvTab.NEW -> ChartsScreen(focusTick = contentFocusTick)
-                        TvTab.MYLIST -> MyListScreen()
-                        TvTab.SEARCH -> SearchScreen()
-                        TvTab.SETTINGS -> SettingsScreen(onOpenDownload = { showDownload = true })
+                        TvTab.NEW -> ChartsScreen(
+                            focusRequestId = focusRequestFor(TvTab.NEW),
+                            onFocusNav = { focusTopNav() },
+                        )
+                        TvTab.MYLIST -> MyListScreen(onFocusNav = { focusTopNav() })
+                        TvTab.SEARCH -> SearchScreen(
+                            focusRequestId = focusRequestFor(TvTab.SEARCH),
+                            onFocusNav = { focusTopNav() },
+                        )
+                        TvTab.SETTINGS -> SettingsScreen(
+                            focusRequestId = focusRequestFor(TvTab.SETTINGS),
+                            onFocusNav = { focusTopNav() },
+                            onOpenDownload = { showDownload = true },
+                        )
                     }
                 }
             }
@@ -172,6 +201,8 @@ fun TvShell() {
     }
 }
 
+private data class ContentFocusRequest(val tab: TvTab, val id: Int)
+
 /**
  * 退出确认弹窗：使用独立窗口 Dialog 隔离底层焦点，遥控才可正常上下左右与 OK 激活。
  * 默认聚焦「取消」，避免误触「退出」；按返回键等同取消。
@@ -181,8 +212,6 @@ private fun ExitConfirmDialog(onExit: () -> Unit, onCancel: () -> Unit) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val cancelRequester = remember { FocusRequester() }
-    var focusExit by remember { mutableStateOf(false) }
-    var focusCancel by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onCancel,
@@ -211,43 +240,18 @@ private fun ExitConfirmDialog(onExit: () -> Unit, onCancel: () -> Unit) {
                     modifier = Modifier.focusGroup(),
                     horizontalArrangement = Arrangement.spacedBy(tv.tvSize(24)),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .focusRequester(cancelRequester)
-                            .onFocusChanged { focusCancel = it.isFocused }
-                            .clickable { onCancel() }
-                            .background(
-                                if (focusCancel) colors.selectGreen else colors.surfaceHigh,
-                                RoundedCornerShape(tv.tvSize(10)),
-                            )
-                            .border(
-                                width = if (focusCancel) 3.dp else 0.dp,
-                                color = colors.focus,
-                                shape = RoundedCornerShape(tv.tvSize(10)),
-                            )
-                            .padding(horizontal = tv.tvSize(36), vertical = tv.tvSize(12)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(TvText.cancelAction, color = Color.White, fontSize = tv.tvFont(20))
-                    }
-                    Box(
-                        modifier = Modifier
-                            .onFocusChanged { focusExit = it.isFocused }
-                            .clickable { onExit() }
-                            .background(
-                                if (focusExit) colors.danger else colors.surfaceHigh,
-                                RoundedCornerShape(tv.tvSize(10)),
-                            )
-                            .border(
-                                width = if (focusExit) 3.dp else 0.dp,
-                                color = colors.focus,
-                                shape = RoundedCornerShape(tv.tvSize(10)),
-                            )
-                            .padding(horizontal = tv.tvSize(36), vertical = tv.tvSize(12)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(TvText.exitApp, color = Color.White, fontSize = tv.tvFont(20))
-                    }
+                    TvActionButton(
+                        label = TvText.cancelAction,
+                        modifier = Modifier.focusRequester(cancelRequester),
+                        size = TvButtonSize.LARGE,
+                        onClick = onCancel,
+                    )
+                    TvActionButton(
+                        label = TvText.exitApp,
+                        tone = TvButtonTone.DANGER,
+                        size = TvButtonSize.LARGE,
+                        onClick = onExit,
+                    )
                 }
             }
         }

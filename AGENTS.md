@@ -12,7 +12,7 @@
 - 播放引擎：**Media3 ExoPlayer**（`androidx.media3:media3-exoplayer:1.4.1`），替代 RN 自研内核。
 - 图片：**Coil** `AsyncImage`；导航：`navigation-compose`（实际只用单 Shell + 叠加层，未大量用导航栈）。
 - 构建：`compileSdk 34` / `minSdk 21` / `targetSdk 34`，Kotlin 1.9.24，Compose 编译器 1.5.14。
-- 入口：`MainActivity` → `TvApp`（装 SplashScreen + `TvTheme`）→ `TvShell`。
+- 入口：`MainActivity` → `TvApp`（`TvTheme`）→ `TvShell`；启动页由 Activity 主题的 `windowBackground` 绘制。
 
 ---
 
@@ -130,7 +130,8 @@ play(item, quality="128k"):
 - **叠加层焦点**：`TvShell` 中播放页/下载面板显示时（`overlayVisible`）会 **unmount 底层 Tab**（`if (!overlayVisible) ...` 包裹）。否则方向键焦点会跑到被遮挡的不可见元素，表现为"焦点消失 / 按 OK 没反应"。任何新增全屏叠加层都要遵循此模式。
 - **返回键分级**（`TvShell` `BackHandler`）：播放页→下载面板→关闭歌单（`playlistTitle` 非空）→焦点回顶栏（不切页）→再按才弹退出确认。误触直接退出是被刻意避免的。
 - **进入播放页两次 `withFrameNanos{}` 延迟再 `requestFocus`**：让组合树先布局再抢焦点（TV 常见时序坑）。
-- **SplashScreen**：`MainActivity` 用 `installSplashScreen` + `setKeepOnScreenCondition { !ready }`，首帧就绪前不消失，避免深色空白屏。
+- **顶栏焦点**：左右键只切 Tab；OK/下键由 `TvShell` 发一次性 `ContentFocusRequest`。搜索/设置/排行榜只在收到该请求时聚焦内容，禁止页面首次组合时自动 `requestFocus`，否则会把焦点从顶栏抢走。
+- **启动页**：`MainActivity` 不再使用 AndroidX SplashScreen；`Theme.HarmoniaMusicTV.Splash` 的 `android:windowBackground` 指向 `@drawable/splash_square`，直接绘制方形 Logo，避免系统 Splash 的圆形裁剪。
 - **搜索/榜单竞态**：`searchTv`/`loadBoard` 用 `seq`/`token` 序号守卫，丢弃过期慢响应，避免旧请求覆盖新结果。
 
 ---
