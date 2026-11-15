@@ -5,14 +5,22 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -84,7 +92,6 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
@@ -94,7 +101,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.harmoniamusic.tv.ui.state.LocalFolder
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextStyle
@@ -365,14 +371,14 @@ private fun HomeCover(url: String?, size: Dp, corner: Int = 12) {
  * 不用 Crop 直接画主图，避免人物脸部/海报文字被横向或纵向截断。
  */
 @Composable
-private fun PlayerArtwork(url: String?, size: Dp) {
+private fun PlayerArtwork(url: String?, modifier: Modifier = Modifier) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val shape = RoundedCornerShape(tv.tvSize(18))
 
     Box(
-        modifier = Modifier
-            .size(size)
+        modifier = modifier
+            .aspectRatio(1f)
             .clip(shape)
             .background(colors.bgWarm)
             .border(1.dp, colors.border, shape),
@@ -765,8 +771,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var interactionTick by remember { mutableStateOf(0) }
     val controlsToggleRequester = remember { FocusRequester() }
-    val density = LocalDensity.current
-    var controlsHeightPx by remember { mutableStateOf(0) }
+    // 控制栏显示时仍为内容保留底部空间，保持原已确认的位置；隐藏时收回到进度锚点高度。
+    val contentBottomInset by animateDpAsState(
+        targetValue = tv.tvSize(if (controlsVisible) 220 else 72),
+        animationSpec = tween(320),
+        label = "playerContentBottomInset",
+    )
     var downloadQualityItem by remember { mutableStateOf<MusicItem?>(null) }
     var downloadQualityOptions by remember { mutableStateOf<List<MusicQuality>>(emptyList()) }
     var addToPlaylistSong by remember { mutableStateOf<MusicItem?>(null) }
@@ -817,7 +827,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
 
     // 播放中一段时间无操作自动收纳控制栏；暂停或报错时保持可见。
     LaunchedEffect(controlsVisible, isPlaying, error, interactionTick) {
-        if (!controlsVisible || !isPlaying || error) return@LaunchedEffect
+        if (error) {
+            if (!controlsVisible) controlsVisible = true
+            return@LaunchedEffect
+        }
+        if (!controlsVisible || !isPlaying) return@LaunchedEffect
         delay(6_000)
         controlsVisible = false
     }
@@ -842,8 +856,8 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 interactionTick++
                 if (!controlsVisible) {
                     controlsVisible = true
-                    // 首次唤出时吞掉 OK，避免它同时触发右上角控制栏开关而立刻收起。
-                    if (event.key == Key.DirectionCenter || event.key == Key.Enter) true else false
+                    // 控制栏隐藏时第一下按键只负责唤出，避免焦点先跑到背后的导航层。
+                    event.key != Key.Back
                 } else {
                     false
                 }
@@ -883,7 +897,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 start = tv.tvSize(70),
                 end = tv.tvSize(70),
                 top = tv.tvSize(44),
-                bottom = tv.tvSize(24),
+                bottom = contentBottomInset,
             ),
             verticalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
         ) {
@@ -956,7 +970,11 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 horizontalArrangement = Arrangement.spacedBy(tv.tvSize(48)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PlayerArtwork(url = current?.img, size = tv.tvSize(320))
+                // 海报取行高并保持 1:1，避免固定尺寸被可用高度压成横向矩形。
+                PlayerArtwork(
+                    url = current?.img,
+                    modifier = Modifier.fillMaxHeight(),
+                )
                 LyricsView(
                     raw = lyric,
                     positionMs = pos,
@@ -965,13 +983,57 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 )
             }
 
-            if (controlsVisible) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onSizeChanged { controlsHeightPx = it.height },
-                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
-                ) {
+        }
+
+        // 隐藏控制栏后只保留一条低调的进度锚点，不再占用内容高度。
+        AnimatedVisibility(
+            visible = !controlsVisible && current != null,
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            enter = fadeIn(animationSpec = tween(420, delayMillis = 180)),
+            exit = fadeOut(animationSpec = tween(120)),
+        ) {
+            PlayerPlaybackAnchor(
+                positionMs = pos,
+                durationMs = dur,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        start = tv.tvSize(70),
+                        end = tv.tvSize(70),
+                        bottom = tv.tvSize(18),
+                    ),
+            )
+        }
+
+        // 控制栏作为底部浮层出现/收起，不再参与上方内容的布局高度。
+        AnimatedVisibility(
+            visible = controlsVisible,
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            enter = fadeIn(animationSpec = tween(180)) +
+                slideInVertically(animationSpec = tween(220), initialOffsetY = { it / 5 }),
+            exit = fadeOut(animationSpec = tween(140)) +
+                slideOutVertically(animationSpec = tween(180), targetOffsetY = { it / 6 }),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.Transparent,
+                                colors.bgDeep.copy(alpha = 0.88f),
+                                colors.bgDeep.copy(alpha = 0.98f),
+                            ),
+                        ),
+                    )
+                    .padding(
+                        start = tv.tvSize(70),
+                        end = tv.tvSize(70),
+                        top = tv.tvSize(38),
+                        bottom = tv.tvSize(24),
+                    ),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
+            ) {
                 // 进度条（可聚焦，左右方向键快进）
                 SeekBar(
                     positionMs = pos,
@@ -1046,10 +1108,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                         modifier = Modifier.align(Alignment.CenterEnd),
                     ) { onBack() }
                 }
-                }
-            } else if (controlsHeightPx > 0) {
-                // 控制栏隐藏时仍保留相同高度，避免封面和歌词重新居中后下跳。
-                Spacer(Modifier.height(with(density) { controlsHeightPx.toDp() }))
             }
         }
         addToPlaylistSong?.let { song ->
@@ -1432,24 +1490,24 @@ private fun PlayerPlaybackDiagnostic(detail: String) {
     val shape = RoundedCornerShape(tv.tvSize(10))
     Row(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxWidth(0.58f)
             .background(colors.surfaceHigh.copy(alpha = 0.62f), shape)
-            .border(1.dp, colors.danger.copy(alpha = 0.42f), shape)
-            .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(8)),
+            .border(1.dp, colors.danger.copy(alpha = 0.28f), shape)
+            .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(5)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = "诊断",
             color = colors.danger,
-            fontSize = tv.tvFont(14),
+            fontSize = tv.tvFont(12),
             fontWeight = FontWeight.Bold,
         )
-        Spacer(Modifier.width(tv.tvSize(12)))
+        Spacer(Modifier.width(tv.tvSize(10)))
         Text(
             text = detail,
             color = colors.subtext,
-            fontSize = tv.tvFont(15),
-            maxLines = 2,
+            fontSize = tv.tvFont(13),
+            maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
@@ -1468,11 +1526,6 @@ private fun PlayerInlineAction(label: String, onClick: () -> Unit) {
             .onFocusChanged { focused = it.isFocused }
             .clickable { onClick() }
             .background(if (focused) colors.selectGreen else colors.surfaceHigh, shape)
-            .border(
-                width = if (focused) 3.dp else 1.dp,
-                color = if (focused) Color.White else colors.line,
-                shape = shape,
-            )
             .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(4)),
     ) {
         Text(
@@ -1523,15 +1576,6 @@ private fun PlayerUtilityButton(
                         else -> colors.surfaceHigh
                     },
                     CircleShape,
-                )
-                .border(
-                    width = if (focused) 3.dp else 1.dp,
-                    color = when {
-                        focused -> Color.White
-                        active -> colors.selectGreen.copy(alpha = 0.7f)
-                        else -> colors.line
-                    },
-                    shape = CircleShape,
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -1568,20 +1612,26 @@ private fun PlayerControlsToggle(
     val tv = LocalTvMetrics.current
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(12))
+    // 隐藏态即使持有焦点也只提亮图标，避免右上角出现抢眼的实心块。
+    val emphasized = focused && visible
     Box(
         modifier = modifier
-            .size(tv.tvSize(58))
+            .size(tv.tvSize(52))
             .onFocusChanged { focused = it.isFocused }
             .clickable { onToggle() }
-            .background(if (focused) colors.selectGreen else colors.surface, shape)
-            .border(if (focused) 3.dp else 0.dp, Color.White, shape),
+            .background(if (emphasized) colors.selectGreen else Color.Transparent, shape),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = if (visible) Icons.Rounded.ExpandMore else Icons.Rounded.ExpandLess,
             contentDescription = if (visible) "隐藏控制栏" else "显示控制栏",
-            tint = if (focused) Color.White else colors.subtext,
-            modifier = Modifier.size(tv.tvSize(30)),
+            tint = when {
+                emphasized -> Color.White
+                focused -> colors.selectGreen
+                visible -> colors.subtext.copy(alpha = 0.86f)
+                else -> colors.dimText.copy(alpha = 0.58f)
+            },
+            modifier = Modifier.size(tv.tvSize(27)),
         )
     }
 }
@@ -1601,8 +1651,29 @@ private fun LyricsView(
     val currentIndex = remember(positionMs, lines) {
         if (lines.isEmpty()) -1 else lines.indexOfLast { it.first <= positionMs }.coerceAtLeast(0)
     }
-    LaunchedEffect(currentIndex) {
-        if (currentIndex >= 0) listState.animateScrollToItem(currentIndex)
+    // 先让歌词从顶部自然往下走；当前行越过中线后才锁定居中滚动。
+    // 这样起唱时第一句与左侧海报顶部对齐，不会凭空留出一大段空白。
+    LaunchedEffect(currentIndex, lines.size) {
+        if (currentIndex < 0) return@LaunchedEffect
+        val wasVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == currentIndex }
+        if (!wasVisible) {
+            listState.scrollToItem(currentIndex)
+            withFrameNanos { }
+        }
+        val info = listState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == currentIndex }
+            ?: return@LaunchedEffect
+        val itemCenter = item.offset + item.size / 2f
+        val viewportCenter = info.viewportEndOffset / 2f
+        val delta = itemCenter - viewportCenter
+        if (!wasVisible) {
+            // 非首行（例如拖动进度后）直接回到中线；首行保持在顶部。
+            if (currentIndex > 0 && kotlin.math.abs(delta) > 1f) {
+                listState.animateScrollBy(delta)
+            }
+        } else if (delta > 1f) {
+            listState.animateScrollBy(delta)
+        }
     }
     if (lines.isEmpty()) {
         Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1615,11 +1686,29 @@ private fun LyricsView(
     } else {
         BoxWithConstraints(modifier) {
             val centerPadding = (maxHeight / 2 - tv.tvSize(28)).coerceAtLeast(tv.tvSize(32))
+            val isScrolled = listState.firstVisibleItemIndex > 0 ||
+                listState.firstVisibleItemScrollOffset > 0
+            val topFadeAlpha by animateFloatAsState(
+                targetValue = if (isScrolled) 1f else 0f,
+                animationSpec = tween(220),
+                label = "lyricTopFade",
+            )
+            // 控制栏显隐会改变歌词区高度；等高度动画结束后，把已进入居中阶段的当前行重新校准。
+            LaunchedEffect(maxHeight, currentIndex) {
+                delay(360)
+                if (isScrolled) {
+                    val info = listState.layoutInfo
+                    val item = info.visibleItemsInfo.firstOrNull { it.index == currentIndex }
+                        ?: return@LaunchedEffect
+                    val delta = item.offset + item.size / 2f - info.viewportEndOffset / 2f
+                    if (kotlin.math.abs(delta) > 1f) listState.animateScrollBy(delta)
+                }
+            }
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
-                contentPadding = PaddingValues(vertical = centerPadding),
+                contentPadding = PaddingValues(top = 0.dp, bottom = centerPadding),
             ) {
                 items(lines.size) { i ->
                     val (_, text) = lines[i]
@@ -1661,17 +1750,20 @@ private fun LyricsView(
                     }
                 }
             }
-            Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .height(tv.tvSize(72))
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(colors.bgDeep.copy(alpha = 0.94f), Color.Transparent),
+            if (topFadeAlpha > 0.01f) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(tv.tvSize(72))
+                        .alpha(topFadeAlpha)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(colors.bgDeep.copy(alpha = 0.94f), Color.Transparent),
+                            ),
                         ),
-                    ),
-            )
+                )
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
@@ -1682,6 +1774,47 @@ private fun LyricsView(
                             listOf(Color.Transparent, colors.bgDeep.copy(alpha = 0.96f)),
                         ),
                     ),
+            )
+        }
+    }
+}
+
+/** 控制栏隐藏时的底部播放锚点：极细进度线与低调时间，不参与焦点导航。 */
+@Composable
+private fun PlayerPlaybackAnchor(
+    positionMs: Long,
+    durationMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val progress = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(420),
+        label = "hiddenPlaybackProgress",
+    )
+    Column(modifier) {
+        LinearProgressIndicator(
+            progress = { animatedProgress },
+            modifier = Modifier.fillMaxWidth().height(tv.tvSize(3)),
+            color = colors.selectGreen.copy(alpha = 0.72f),
+            trackColor = colors.text.copy(alpha = 0.08f),
+        )
+        Spacer(Modifier.height(tv.tvSize(6)))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = formatTime(positionMs),
+                color = colors.dimText.copy(alpha = 0.62f),
+                fontSize = tv.tvFont(12),
+            )
+            Text(
+                text = formatTime(durationMs),
+                color = colors.dimText.copy(alpha = 0.62f),
+                fontSize = tv.tvFont(12),
             )
         }
     }
@@ -1716,7 +1849,11 @@ private fun SeekBar(
                 }
             }
             .focusable()
-            .border(if (focused) 2.dp else 0.dp, colors.focus, RoundedCornerShape(tv.tvSize(10)))
+            .border(
+                if (focused) 2.dp else 0.dp,
+                colors.selectGreen.copy(alpha = 0.55f),
+                RoundedCornerShape(tv.tvSize(10)),
+            )
             .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(8)),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
@@ -1743,7 +1880,7 @@ private fun SeekBar(
                 modifier = Modifier
                     .offset(x = maxOffset * animatedProgress)
                     .size(tv.tvSize(thumbSize))
-                    .background(if (focused) colors.focus else colors.selectGreen, CircleShape),
+                    .background(colors.selectGreen, CircleShape),
             )
         }
         Text(
@@ -1754,7 +1891,7 @@ private fun SeekBar(
         )
         Text(
             text = "◀ 左右快进 ▶",
-            color = if (focused) colors.focus else Color.Transparent,
+            color = if (focused) colors.selectGreen else Color.Transparent,
             fontSize = tv.tvFont(14),
             modifier = Modifier.width(tv.tvSize(112)),
         )
@@ -1766,6 +1903,14 @@ private fun playModeLabel(mode: PlayQueue.Mode): String = when (mode) {
     PlayQueue.Mode.SINGLE -> TvText.singleLoop
     PlayQueue.Mode.SHUFFLE -> TvText.random
 }
+
+private val lyricCreditPattern = Regex(
+    "^(作词|填词|词曲|作曲|编曲|制作人|监制|出品人?|发行|录音师?|混音师?|母带|和声|配唱|吉他|贝斯|鼓手?|键盘|弦乐|OP|SP|词|曲|演唱|原唱|翻唱|统筹|企划|策划|制作|编配|人声|录音棚|Lyrics|Composer|Composed by|Arranger|Arranged by|Producer|Mixed by|Mastered by|Written by)(\\s*[:：/·]|\\s+)",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun isLyricCreditLine(text: String): Boolean =
+    lyricCreditPattern.containsMatchIn(text.trim())
 
 /** 解析 LRC 歌词为 (时间ms, 文本) 列表；一行多时间戳会展开为多行。 */
 private fun parseLrc(raw: String): List<Pair<Long, String>> {
@@ -1779,7 +1924,9 @@ private fun parseLrc(raw: String): List<Pair<Long, String>> {
             min * 60_000 + (sec * 1000).toLong()
         }.toList()
         val text = line.replace(timeRe, "").trim()
-        if (text.isNotEmpty()) times.forEach { t -> result.add(t to text) }
+        if (text.isNotEmpty() && !isLyricCreditLine(text)) {
+            times.forEach { t -> result.add(t to text) }
+        }
     }
     if (result.isEmpty()) {
         // 部分音源会返回无时间轴的纯文本歌词；按行铺开仍可阅读，聊胜于只显示“暂无歌词”。
@@ -1790,6 +1937,7 @@ private fun parseLrc(raw: String): List<Pair<Long, String>> {
                 it.startsWith("[ti:") || it.startsWith("[ar:") || it.startsWith("[al:") ||
                     it.startsWith("[by:") || it.startsWith("[offset:")
             }
+            .filterNot { isLyricCreditLine(it) }
             .mapIndexed { index, line -> (index * 4_000L) to line }
             .toList()
     }
@@ -1837,19 +1985,6 @@ private fun ControlIconButton(
                         else -> colors.surface
                     },
                     CircleShape,
-                )
-                .border(
-                    width = when {
-                        focused -> 4.dp
-                        primary -> 2.dp
-                        else -> 1.dp
-                    },
-                    color = when {
-                        focused -> Color.White
-                        primary -> colors.selectGreen.copy(alpha = 0.70f)
-                        else -> Color.White.copy(alpha = 0.10f)
-                    },
-                    shape = CircleShape,
                 ),
             contentAlignment = Alignment.Center,
         ) {
