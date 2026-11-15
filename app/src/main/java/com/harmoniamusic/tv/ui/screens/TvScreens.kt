@@ -58,6 +58,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -80,11 +81,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -106,9 +109,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.harmoniamusic.tv.ui.state.LocalFolder
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.SolidColor
@@ -129,6 +136,7 @@ import com.harmoniamusic.tv.data.queue.PlayQueue
 import androidx.compose.foundation.layout.PaddingValues
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import com.harmoniamusic.tv.ui.shell.TvTab
 import com.harmoniamusic.tv.ui.state.DownloadViewModel
 import com.harmoniamusic.tv.ui.state.LyricLoadState
@@ -143,6 +151,7 @@ import com.harmoniamusic.tv.ui.components.TvChoiceChip
 import com.harmoniamusic.tv.ui.components.TvIconButton
 import com.harmoniamusic.tv.ui.theme.LocalTvColors
 import com.harmoniamusic.tv.ui.theme.LocalTvMetrics
+import com.harmoniamusic.tv.ui.theme.TvColorScheme
 import com.harmoniamusic.tv.ui.theme.tvFont
 import com.harmoniamusic.tv.ui.theme.tvSize
 import androidx.compose.runtime.collectAsState
@@ -1342,6 +1351,7 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     val downloadMessage by downloadVm.message.collectAsState()
     val toastContext = LocalContext.current
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var showPlaybackDiagnostic by remember { mutableStateOf(false) }
     var interactionTick by remember { mutableStateOf(0) }
     val controlsToggleRequester = remember { FocusRequester() }
     // 控制栏显示时仍为内容保留底部空间，保持原已确认的位置；隐藏时收回到进度锚点高度。
@@ -1354,6 +1364,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
     var downloadQualityOptions by remember { mutableStateOf<List<MusicQuality>>(emptyList()) }
     var addToPlaylistSong by remember { mutableStateOf<MusicItem?>(null) }
     var pendingPlaylistSong by remember { mutableStateOf<MusicItem?>(null) }
+
+    BackHandler(enabled = controlsVisible) {
+        controlsVisible = false
+    }
 
     fun requestDownload(item: MusicItem?) {
         if (item == null) {
@@ -1381,30 +1395,30 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
         downloadVm.clearMessage()
     }
 
+    LaunchedEffect(error) {
+        if (!error) showPlaybackDiagnostic = false
+    }
+
     // 进入播放页自动把焦点交给“播放/暂停”按钮，遥控器方向键/OK 立即可用
     val playRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         withFrameNanos { }
         withFrameNanos { }
         vm.loadUserPlaylists()
+        runCatching { playRequester.requestFocus() }
     }
 
+    // 只处理控制栏收起后的焦点回收；重新展开时不要把焦点从右上角三角抢走。
     LaunchedEffect(controlsVisible) {
+        if (controlsVisible) return@LaunchedEffect
         withFrameNanos { }
         withFrameNanos { }
-        runCatching {
-            if (controlsVisible) playRequester.requestFocus()
-            else controlsToggleRequester.requestFocus()
-        }
+        runCatching { controlsToggleRequester.requestFocus() }
     }
 
     // 播放中一段时间无操作自动收纳控制栏；暂停或报错时保持可见。
     LaunchedEffect(controlsVisible, isPlaying, error, interactionTick) {
-        if (error) {
-            if (!controlsVisible) controlsVisible = true
-            return@LaunchedEffect
-        }
-        if (!controlsVisible || !isPlaying) return@LaunchedEffect
+        if (error || !controlsVisible || !isPlaying) return@LaunchedEffect
         delay(6_000)
         controlsVisible = false
     }
@@ -1428,9 +1442,10 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 interactionTick++
                 if (!controlsVisible) {
+                    if (event.key == Key.Back) return@onPreviewKeyEvent false
                     controlsVisible = true
                     // 控制栏隐藏时第一下按键只负责唤出，避免焦点先跑到背后的导航层。
-                    event.key != Key.Back
+                    true
                 } else {
                     false
                 }
@@ -1520,6 +1535,17 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                                     maxLines = 1,
                                 )
                                 PlayerInlineAction(TvText.chartRetry) { vm.togglePlay() }
+                                if (playbackErrorDetail.isNotBlank()) {
+                                    TvIconButton(
+                                        icon = Icons.Rounded.ErrorOutline,
+                                        contentDescription = TvText.playbackDiagnosticAction,
+                                        logicalSize = 38,
+                                        iconLogicalSize = 20,
+                                        shape = CircleShape,
+                                    ) {
+                                        showPlaybackDiagnostic = true
+                                    }
+                                }
                             }
                         } else if (statusText.isNotBlank()) {
                             Text(statusText, color = colors.dimText, fontSize = tv.tvFont(15))
@@ -1531,10 +1557,6 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                         modifier = Modifier.focusRequester(controlsToggleRequester),
                     ) { controlsVisible = !controlsVisible }
                 }
-            }
-
-            if (error && playbackErrorDetail.isNotBlank()) {
-                PlayerPlaybackDiagnostic(playbackErrorDetail)
             }
 
             // 中部：封面 + 歌词
@@ -1682,6 +1704,12 @@ fun PlayerScreen(vm: PlayerViewModel = viewModel(), onBack: () -> Unit = {}) {
                     ) { onBack() }
                 }
             }
+        }
+        if (showPlaybackDiagnostic && playbackErrorDetail.isNotBlank()) {
+            PlayerPlaybackDiagnosticDialog(
+                detail = playbackErrorDetail,
+                onDismiss = { showPlaybackDiagnostic = false },
+            )
         }
         addToPlaylistSong?.let { song ->
             AddToPlaylistDialog(
@@ -2055,35 +2083,81 @@ private fun PlayerSourceBadge(label: String) {
     }
 }
 
-/** 播放失败时展示配置源与逐源尝试结果，避免只看到笼统的“取流失败”。 */
+/** 播放失败详情弹窗：入口保持轻量，技术信息按需展开阅读。 */
 @Composable
-private fun PlayerPlaybackDiagnostic(detail: String) {
+private fun PlayerPlaybackDiagnosticDialog(
+    detail: String,
+    onDismiss: () -> Unit,
+) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    val shape = RoundedCornerShape(tv.tvSize(10))
-    Row(
-        modifier = Modifier
-            .fillMaxWidth(0.58f)
-            .background(colors.surfaceHigh.copy(alpha = 0.62f), shape)
-            .border(1.dp, colors.danger.copy(alpha = 0.28f), shape)
-            .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(5)),
-        verticalAlignment = Alignment.CenterVertically,
+    val closeRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching { closeRequester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Text(
-            text = "诊断",
-            color = colors.danger,
-            fontSize = tv.tvFont(12),
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.width(tv.tvSize(10)))
-        Text(
-            text = detail,
-            color = colors.subtext,
-            fontSize = tv.tvFont(13),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Box(
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(760))
+                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(18)))
+                    .padding(tv.tvSize(36)),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ErrorOutline,
+                        contentDescription = null,
+                        tint = colors.danger,
+                        modifier = Modifier.size(tv.tvSize(28)),
+                    )
+                    Text(
+                        text = TvText.playbackDiagnosticTitle,
+                        color = colors.danger,
+                        fontSize = tv.tvFont(24),
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Text(
+                    text = TvText.playbackDiagnosticHint,
+                    color = colors.text,
+                    fontSize = tv.tvFont(17),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = detail,
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(15),
+                    lineHeight = tv.tvFont(22),
+                    maxLines = 8,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surface, RoundedCornerShape(tv.tvSize(10)))
+                        .padding(horizontal = tv.tvSize(16), vertical = tv.tvSize(12)),
+                )
+                TvActionButton(
+                    label = TvText.closeAction,
+                    modifier = Modifier.fillMaxWidth().focusRequester(closeRequester),
+                    size = TvButtonSize.LARGE,
+                    onClick = onDismiss,
+                )
+            }
+        }
     }
 }
 
@@ -2465,12 +2539,6 @@ private fun SeekBar(
             fontSize = tv.tvFont(17),
             modifier = Modifier.width(tv.tvSize(62)),
         )
-        Text(
-            text = "◀ 左右快进 ▶",
-            color = if (focused) colors.selectGreen else Color.Transparent,
-            fontSize = tv.tvFont(14),
-            modifier = Modifier.width(tv.tvSize(112)),
-        )
     }
 }
 
@@ -2609,7 +2677,6 @@ fun ChartsScreen(
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    val context = LocalContext.current
     val boards by vm.boards.collectAsState()
     val boardsLoading by vm.boardsLoading.collectAsState()
     val boardsError by vm.boardsError.collectAsState()
@@ -2620,6 +2687,7 @@ fun ChartsScreen(
     val boardCovers by vm.boardCovers.collectAsState()
     val chartSourceId by vm.chartSourceId.collectAsState()
     val current by vm.current.collectAsState()
+    val isPlaying by vm.isPlaying.collectAsState()
 
     val selectedBoard = boards.firstOrNull { it.bangid == selectedBangid }
     val selectedBoardName = selectedBoard?.name ?: TvText.ranking
@@ -2711,7 +2779,6 @@ fun ChartsScreen(
                             cover = boardCovers["$chartSourceId|${board.bangid}"],
                             selected = selectedBangid == board.bangid,
                             focusRequester = boardRequesters.getOrPut(board.bangid) { FocusRequester() },
-                            onFocused = { vm.selectBoard(board.bangid) },
                             onClick = {
                                 vm.selectBoard(board.bangid)
                                 actionFocusTick++
@@ -2727,7 +2794,6 @@ fun ChartsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(colors.surface, RoundedCornerShape(tv.tvSize(12)))
-                .border(1.dp, colors.border, RoundedCornerShape(tv.tvSize(12)))
                 .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(9)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2759,25 +2825,21 @@ fun ChartsScreen(
                 horizontalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                HomePill(
+                CollectionActionButton(
+                    icon = Icons.Rounded.PlayArrow,
                     label = TvText.playAll,
                     modifier = Modifier.focusRequester(playAllRequester),
+                    tone = TvButtonTone.PRIMARY,
                     enabled = boardList.isNotEmpty(),
                 ) {
                     vm.playList(boardList, 0, selectedBoardName)
                 }
-                HomePill(
+                CollectionActionButton(
+                    icon = Icons.Rounded.Shuffle,
                     label = TvText.random,
                     enabled = boardList.isNotEmpty(),
                 ) {
                     vm.playShuffled(boardList, selectedBoardName)
-                }
-                HomePill(
-                    label = TvText.addToQueue,
-                    enabled = boardList.isNotEmpty(),
-                ) {
-                    vm.addToQueue(boardList, selectedBoardName)
-                    Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -2823,11 +2885,10 @@ fun ChartsScreen(
                             index = index,
                             item = item,
                             isCurrent = current?.source == item.source && current?.songmid == item.songmid,
+                            isPlaying = current?.source == item.source &&
+                                current?.songmid == item.songmid &&
+                                isPlaying,
                             onPlay = { vm.playList(boardList, index, selectedBoardName) },
-                            onAddToQueue = {
-                                vm.addToQueue(listOf(item), selectedBoardName)
-                                Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
-                            },
                         )
                     }
                 }
@@ -2850,7 +2911,6 @@ private fun ChartRailMessage(
             .fillMaxWidth()
             .height(tv.tvSize(84))
             .background(colors.surface, RoundedCornerShape(tv.tvSize(12)))
-            .border(1.dp, colors.border, RoundedCornerShape(tv.tvSize(12)))
             .padding(horizontal = tv.tvSize(20)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2888,7 +2948,6 @@ private fun ChartBoardCard(
     cover: String?,
     selected: Boolean,
     focusRequester: FocusRequester,
-    onFocused: () -> Unit,
     onClick: () -> Unit,
 ) {
     val colors = LocalTvColors.current
@@ -2900,7 +2959,7 @@ private fun ChartBoardCard(
         label = "chartBoardScale",
     )
     val shape = RoundedCornerShape(tv.tvSize(12))
-    Column(
+    TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(158))
             .graphicsLayer {
@@ -2908,50 +2967,44 @@ private fun ChartBoardCard(
                 scaleY = scale
             }
             .focusRequester(focusRequester)
-            .onFocusChanged {
-                focused = it.isFocused
-                if (it.isFocused) onFocused()
-            }
-            .clickable { onClick() }
-            .background(
-                when {
-                    focused -> colors.selectGreen.copy(alpha = 0.16f)
-                    selected -> colors.surface
-                    else -> Color.Transparent
-                },
-                shape,
+            .onFocusChanged { focused = it.isFocused },
+        shape = shape,
+        selected = selected,
+        onClick = onClick,
+        contentAlignment = Alignment.CenterStart,
+    ) { surfaceFocused ->
+        Column(modifier = Modifier.padding(tv.tvSize(5))) {
+            ChartBoardArtwork(
+                board = board,
+                index = index,
+                cover = cover,
+                modifier = Modifier.fillMaxWidth().height(tv.tvSize(86)),
             )
-            .then(
-                when {
-                    focused -> Modifier.border(3.dp, colors.selectGreen, shape)
-                    selected -> Modifier.border(2.dp, colors.selectGreen, shape)
-                    else -> Modifier
+            Spacer(Modifier.height(tv.tvSize(4)))
+            Text(
+                text = board.name,
+                color = when {
+                    surfaceFocused -> Color.White
+                    selected -> colors.text
+                    else -> colors.subtext
                 },
+                fontSize = tv.tvFont(17),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            .padding(tv.tvSize(5)),
-    ) {
-        ChartBoardArtwork(
-            board = board,
-            index = index,
-            cover = cover,
-            modifier = Modifier.fillMaxWidth().height(tv.tvSize(86)),
-        )
-        Spacer(Modifier.height(tv.tvSize(4)))
-        Text(
-            text = board.name,
-            color = if (focused || selected) colors.text else colors.subtext,
-            fontSize = tv.tvFont(17),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = if (selected) TvText.chartCurrent else sourceLabel(index),
-            color = if (selected) colors.selectGreen else colors.dimText,
-            fontSize = tv.tvFont(12),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+            Text(
+                text = if (selected) TvText.chartCurrent else sourceLabel(index),
+                color = when {
+                    surfaceFocused -> Color.White.copy(alpha = 0.78f)
+                    selected -> colors.selectGreen
+                    else -> colors.dimText
+                },
+                fontSize = tv.tvFont(12),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -3042,85 +3095,80 @@ private fun ChartSongRow(
     index: Int,
     item: MusicItem,
     isCurrent: Boolean,
+    isPlaying: Boolean,
     onPlay: () -> Unit,
-    onAddToQueue: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     val topThree = index < 3
     val shape = RoundedCornerShape(tv.tvSize(8))
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused }
-            .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && event.key == Key.Menu) {
-                    onAddToQueue()
-                    true
-                } else {
-                    false
-                }
-            }
-            .clickable { onPlay() }
-            .background(
-                when {
-                    focused -> colors.selectGreen.copy(alpha = 0.16f)
-                    isCurrent -> colors.selectGreen.copy(alpha = 0.1f)
-                    else -> Color.Transparent
-                },
-                shape,
-            )
-            .then(
-                when {
-                    focused -> Modifier.border(3.dp, colors.selectGreen, shape)
-                    isCurrent -> Modifier.border(1.dp, colors.selectGreen, shape)
-                    else -> Modifier
-                },
-            )
-            .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(5)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "%02d".format(index + 1),
-            color = when {
-                focused -> colors.selectGreen
-                topThree -> colors.orange
-                else -> colors.dimText
-            },
-            fontSize = if (topThree) tv.tvFont(22) else tv.tvFont(15),
-            fontWeight = if (topThree) FontWeight.Bold else FontWeight.Normal,
-            modifier = Modifier.width(tv.tvSize(42)),
-        )
-        HomeCover(url = item.img, size = tv.tvSize(44), corner = 7)
-        Spacer(Modifier.width(tv.tvSize(10)))
-        Column(Modifier.weight(1f)) {
+    TvButtonSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = shape,
+        selected = isCurrent,
+        onClick = onPlay,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(5)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                text = item.name,
-                color = colors.text,
-                fontSize = tv.tvFont(18),
-                fontWeight = if (focused || topThree) FontWeight.Bold else FontWeight.Normal,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                text = "%02d".format(index + 1),
+                color = when {
+                    focused -> Color.White.copy(alpha = 0.84f)
+                    topThree -> colors.orange
+                    else -> colors.dimText
+                },
+                fontSize = if (topThree) tv.tvFont(22) else tv.tvFont(15),
+                fontWeight = if (topThree) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.width(tv.tvSize(42)),
             )
-            Text(
-                text = item.singer.ifBlank { TvText.unknownSinger },
-                color = colors.subtext,
-                fontSize = tv.tvFont(13),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (isCurrent) {
-            PlayingBars(color = colors.selectGreen)
+            HomeCover(url = item.img, size = tv.tvSize(44), corner = 7)
             Spacer(Modifier.width(tv.tvSize(10)))
-        }
-        if (item.interval.isNotBlank()) {
-            Text(
-                text = item.interval,
-                color = colors.dimText,
-                fontSize = tv.tvFont(14),
-            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = item.name,
+                    color = when {
+                        focused -> Color.White
+                        isCurrent -> colors.selectGreen
+                        else -> colors.text
+                    },
+                    fontSize = tv.tvFont(18),
+                    fontWeight = if (focused || topThree) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = item.singer.ifBlank { TvText.unknownSinger },
+                    color = if (focused) Color.White.copy(alpha = 0.76f) else colors.subtext,
+                    fontSize = tv.tvFont(13),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (isCurrent) {
+                if (isPlaying) {
+                    PlayingBars(color = if (focused) Color.White else colors.selectGreen)
+                } else {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = TvText.nowPlaying,
+                        tint = if (focused) Color.White else colors.selectGreen,
+                        modifier = Modifier.size(tv.tvSize(18)),
+                    )
+                }
+                Spacer(Modifier.width(tv.tvSize(10)))
+            }
+            if (item.interval.isNotBlank()) {
+                Text(
+                    text = item.interval,
+                    color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                    fontSize = tv.tvFont(14),
+                )
+            }
         }
     }
 }
@@ -3554,6 +3602,15 @@ fun MyListScreen(
     }
 }
 
+private fun Modifier.libraryCardChrome(
+    shape: RoundedCornerShape,
+    colors: TvColorScheme,
+): Modifier = shadow(
+    elevation = if (colors.isDark) 2.dp else 1.dp,
+    shape = shape,
+    clip = false,
+).border(1.dp, colors.cardBorder, shape)
+
 @Composable
 private fun UserPlaylistRail(
     playlists: List<UserPlaylist>,
@@ -3592,6 +3649,7 @@ private fun UserPlaylistCard(
     TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(166))
+            .libraryCardChrome(shape, colors)
             .onFocusChanged {
                 if (!it.isFocused) {
                     longPressTriggered = false
@@ -3632,6 +3690,7 @@ private fun UserPlaylistCard(
                 }
             },
         shape = shape,
+        containerColor = colors.card,
         onClick = onOpen,
         contentAlignment = Alignment.CenterStart,
     ) { focused ->
@@ -3663,7 +3722,11 @@ private fun UserPlaylistCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = if (playlist.songs.isEmpty()) PlaylistText.emptyPlaylists else "${playlist.songs.size} 首 · 长按管理",
+                text = if (playlist.songs.isEmpty()) {
+                    "空歌单 · 长按 OK 管理"
+                } else {
+                    "${playlist.songs.size} 首 · 长按 OK 管理"
+                },
                 color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
                 fontSize = tv.tvFont(14),
                 maxLines = 1,
@@ -3679,8 +3742,9 @@ private fun AddPlaylistCard(onClick: () -> Unit) {
     val tv = LocalTvMetrics.current
     val shape = RoundedCornerShape(tv.tvSize(12))
     TvButtonSurface(
-        modifier = Modifier.width(tv.tvSize(166)),
+        modifier = Modifier.width(tv.tvSize(166)).libraryCardChrome(shape, colors),
         shape = shape,
+        containerColor = colors.card,
         onClick = onClick,
         contentAlignment = Alignment.CenterStart,
     ) { focused ->
@@ -3762,8 +3826,10 @@ private fun FavoriteCollectionCard(
     val shape = RoundedCornerShape(tv.tvSize(12))
     TvButtonSurface(
         modifier = modifier
-            .width(tv.tvSize(166)),
+            .width(tv.tvSize(166))
+            .libraryCardChrome(shape, colors),
         shape = shape,
+        containerColor = colors.card,
         onClick = onClick,
         contentAlignment = Alignment.CenterStart,
     ) { focused ->
@@ -3844,6 +3910,7 @@ private fun RecentTrackCard(
     TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(170))
+            .libraryCardChrome(cardShape, colors)
             .onFocusChanged {
                 if (!it.isFocused) {
                     longPressTriggered = false
@@ -3884,6 +3951,7 @@ private fun RecentTrackCard(
                 }
             },
         shape = cardShape,
+        containerColor = colors.card,
         selected = isCurrent,
         onClick = onClick,
         contentAlignment = Alignment.CenterStart,
@@ -3959,6 +4027,7 @@ private fun LocalFolderCard(
     TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(166))
+            .libraryCardChrome(shape, colors)
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyUp && event.key == Key.Menu) {
                     onManage()
@@ -3968,6 +4037,7 @@ private fun LocalFolderCard(
                 }
             },
         shape = shape,
+        containerColor = colors.card,
         onClick = onOpen,
         contentAlignment = Alignment.CenterStart,
     ) { focused ->
@@ -4003,8 +4073,9 @@ private fun AddFolderCard(onClick: () -> Unit) {
     val tv = LocalTvMetrics.current
     val shape = RoundedCornerShape(tv.tvSize(12))
     TvButtonSurface(
-        modifier = Modifier.width(tv.tvSize(166)),
+        modifier = Modifier.width(tv.tvSize(166)).libraryCardChrome(shape, colors),
         shape = shape,
+        containerColor = colors.card,
         onClick = onClick,
         contentAlignment = Alignment.CenterStart,
     ) { focused ->
@@ -4722,6 +4793,7 @@ fun SearchScreen(
     val activeQuery by vm.tvSearchQuery.collectAsState()
     val error by vm.tvSearchError.collectAsState()
     val current by vm.current.collectAsState()
+    val isPlaying by vm.isPlaying.collectAsState()
 
     val searchFieldFocus = remember { FocusRequester() }
     val firstResultFocus = remember { FocusRequester() }
@@ -4747,6 +4819,13 @@ fun SearchScreen(
         keyboard?.hide()
         focusResultsAfterSearch = true
         vm.searchTv(query, 1)
+    }
+
+    fun clearQuery() {
+        text = String()
+        keyboard?.hide()
+        vm.clearTvSearch()
+        runCatching { searchFieldFocus.requestFocus() }
     }
 
     LaunchedEffect(focusRequestId) {
@@ -4776,7 +4855,10 @@ fun SearchScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = tv.tvSize(64), vertical = tv.tvSize(22)),
+            .padding(
+                horizontal = tv.tvSize(64),
+                vertical = tv.tvSize(if (showingResults) 14 else 22),
+            ),
     ) {
         Row(
             modifier = Modifier
@@ -4794,16 +4876,16 @@ fun SearchScreen(
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = TvText.searchTitle,
+                    text = if (showingResults) TvText.search else TvText.searchTitle,
                     color = colors.text,
-                    fontSize = tv.tvFont(36),
+                    fontSize = tv.tvFont(if (showingResults) 26 else 36),
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.height(tv.tvSize(4)))
                 Text(
                     text = if (activeQuery.isNotBlank()) {
                         if (loading) "${TvText.searching} · $activeQuery"
-                        else "${pageInfo.total} ${TvText.songs} · “$activeQuery”"
+                        else "${results.size} ${TvText.songs} · “$activeQuery”"
                     } else {
                         TvText.searchLandingHint
                     },
@@ -4813,30 +4895,24 @@ fun SearchScreen(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (activeQuery.isNotBlank()) {
-                SearchTextAction(TvText.clear) {
-                    text = String()
-                    keyboard?.hide()
-                    vm.clearTvSearch()
-                    runCatching { searchFieldFocus.requestFocus() }
-                }
-            }
         }
-        Spacer(Modifier.height(tv.tvSize(14)))
+        Spacer(Modifier.height(tv.tvSize(if (showingResults) 8 else 14)))
         SearchInputBar(
             text = text,
             onTextChange = { text = it },
             focusRequester = searchFieldFocus,
             onSubmit = { submit() },
+            onClear = { clearQuery() },
             onFocusNav = onFocusNav,
         )
-        Spacer(Modifier.height(tv.tvSize(16)))
+        Spacer(Modifier.height(tv.tvSize(if (showingResults) 10 else 16)))
 
         if (showingResults) {
             SearchSourceRail(
                 source = source,
                 sourceTabs = sourceTabs,
                 pageInfo = pageInfo,
+                loadedCount = results.size,
                 loading = loading,
                 onSelect = { vm.setTvSearchSource(it) },
             )
@@ -4845,6 +4921,8 @@ fun SearchScreen(
                 query = activeQuery,
                 results = results,
                 current = current,
+                isPlaying = isPlaying,
+                showSource = source == PlayerViewModel.SOURCE_ALL,
                 pageInfo = pageInfo,
                 loading = loading,
                 error = error,
@@ -4852,7 +4930,6 @@ fun SearchScreen(
                 onRetry = { submit(activeQuery) },
                 onLoadMore = { vm.searchTv(activeQuery, pageInfo.page + 1) },
                 onPlay = { index -> vm.playList(results, index, TvText.searchResult) },
-                onAddToQueue = { vm.addToQueue(listOf(it), TvText.searchResult) },
                 modifier = Modifier.weight(1f),
             )
         } else {
@@ -4873,6 +4950,7 @@ private fun SearchInputBar(
     onTextChange: (String) -> Unit,
     focusRequester: FocusRequester,
     onSubmit: () -> Unit,
+    onClear: () -> Unit,
     onFocusNav: () -> Unit,
 ) {
     val colors = LocalTvColors.current
@@ -4962,15 +5040,26 @@ private fun SearchInputBar(
                         }
                         innerTextField()
                     }
-                    Text(
-                        text = TvText.searchInputHint,
-                        color = colors.dimText,
-                        fontSize = tv.tvFont(14),
-                        maxLines = 1,
-                    )
+                    if (text.isBlank()) {
+                        Text(
+                            text = TvText.searchInputHint,
+                            color = colors.dimText,
+                            fontSize = tv.tvFont(14),
+                            maxLines = 1,
+                        )
+                    }
                 }
             },
         )
+        if (text.isNotBlank()) {
+            TvIconButton(
+                icon = Icons.Rounded.Close,
+                contentDescription = TvText.clear,
+                logicalSize = 44,
+                iconLogicalSize = 20,
+                onClick = onClear,
+            )
+        }
         SettingActionButton(TvText.search) { submitFromKeyboard() }
     }
 }
@@ -4980,6 +5069,7 @@ private fun SearchSourceRail(
     source: String,
     sourceTabs: List<String>,
     pageInfo: PlayerViewModel.TvSearchPageInfo,
+    loadedCount: Int,
     loading: Boolean,
     onSelect: (String) -> Unit,
 ) {
@@ -5006,7 +5096,7 @@ private fun SearchSourceRail(
         Spacer(Modifier.weight(1f))
         Text(
             text = if (loading) TvText.searching
-            else "${pageInfo.page}/${pageInfo.maxPage} · ${pageInfo.total} ${TvText.songs}",
+            else "已加载 $loadedCount 首 · ${pageInfo.page}/${pageInfo.maxPage}",
             color = colors.dimText,
             fontSize = tv.tvFont(15),
             maxLines = 1,
@@ -5019,6 +5109,8 @@ private fun SearchResultsPane(
     query: String,
     results: List<MusicItem>,
     current: MusicItem?,
+    isPlaying: Boolean,
+    showSource: Boolean,
     pageInfo: PlayerViewModel.TvSearchPageInfo,
     loading: Boolean,
     error: String?,
@@ -5026,11 +5118,23 @@ private fun SearchResultsPane(
     onRetry: () -> Unit,
     onLoadMore: () -> Unit,
     onPlay: (Int) -> Unit,
-    onAddToQueue: (MusicItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(listState, loading, pageInfo.page, pageInfo.maxPage, results.size) {
+        if (loading || results.isEmpty() || pageInfo.page >= pageInfo.maxPage) {
+            return@LaunchedEffect
+        }
+        snapshotFlow {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            lastVisible >= results.lastIndex - 3
+        }.distinctUntilChanged().collect { nearEnd ->
+            if (nearEnd) onLoadMore()
+        }
+    }
 
     Column(modifier.fillMaxSize()) {
         Row(
@@ -5042,13 +5146,13 @@ private fun SearchResultsPane(
                 Text(
                     text = TvText.searchResult,
                     color = colors.text,
-                    fontSize = tv.tvFont(26),
+                    fontSize = tv.tvFont(22),
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.height(tv.tvSize(3)))
                 Text(
                     text = if (loading) TvText.searching
-                    else "${pageInfo.total} ${TvText.songs} · ${TvText.searchPlayHint}",
+                    else "已加载 ${results.size} 首 · ${TvText.searchPlayHint}",
                     color = colors.dimText,
                     fontSize = tv.tvFont(15),
                     maxLines = 1,
@@ -5063,7 +5167,7 @@ private fun SearchResultsPane(
                 )
             }
         }
-        Spacer(Modifier.height(tv.tvSize(10)))
+        Spacer(Modifier.height(tv.tvSize(6)))
 
         when {
             loading && results.isEmpty() -> SearchLoadingSkeleton(
@@ -5084,6 +5188,7 @@ private fun SearchResultsPane(
             )
             else -> {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(tv.tvSize(7)),
                 ) {
@@ -5092,14 +5197,17 @@ private fun SearchResultsPane(
                         key = { index, item -> "${item.source}:${item.songmid}:$index" },
                     ) { index, item ->
                         SearchResultCard(
-                            index = index,
                             item = item,
                             isCurrent = current?.let {
                                 it.source == item.source && it.songmid == item.songmid
                             } == true,
+                            isPlaying = current?.let {
+                                it.source == item.source && it.songmid == item.songmid
+                            } == true && isPlaying,
+                            query = query,
+                            showSource = showSource,
                             focusRequester = if (index == 0) firstResultFocus else null,
                             onClick = { onPlay(index) },
-                            onAddToQueue = { onAddToQueue(item) },
                         )
                     }
                     if (pageInfo.page < pageInfo.maxPage) {
@@ -5108,15 +5216,11 @@ private fun SearchResultsPane(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = tv.tvSize(8)),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                if (loading) {
-                                    Text(
-                                        text = TvText.searching,
-                                        color = colors.dimText,
-                                        fontSize = tv.tvFont(17),
-                                    )
-                                } else {
-                                    SettingActionButton(TvText.loadMore, onLoadMore)
-                                }
+                                Text(
+                                    text = if (loading) TvText.searching else "",
+                                    color = colors.dimText,
+                                    fontSize = tv.tvFont(16),
+                                )
                             }
                         }
                     }
@@ -5162,128 +5266,158 @@ private fun SearchTextAction(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun SearchResultCard(
-    index: Int,
     item: MusicItem,
     isCurrent: Boolean,
+    isPlaying: Boolean,
+    query: String,
+    showSource: Boolean,
     focusRequester: FocusRequester?,
     onClick: () -> Unit,
-    onAddToQueue: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(10))
 
-    Row(
+    TvButtonSurface(
         modifier = Modifier
             .fillMaxWidth()
             .let { base ->
                 if (focusRequester != null) base.focusRequester(focusRequester) else base
-            }
-            .onFocusChanged { focused = it.isFocused }
-            .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && event.key == Key.Menu) {
-                    onAddToQueue()
-                    true
-                } else {
-                    false
+            },
+        shape = shape,
+        selected = isCurrent,
+        onClick = onClick,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(7)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.width(tv.tvSize(34)),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                when {
+                    isCurrent && isPlaying -> PlayingBars(
+                        color = if (focused) Color.White else colors.selectGreen,
+                    )
+                    isCurrent -> Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = TvText.nowPlaying,
+                        tint = if (focused) Color.White else colors.selectGreen,
+                        modifier = Modifier.size(tv.tvSize(19)),
+                    )
+                    else -> Unit
                 }
             }
-            .clickable { onClick() }
-            .background(
-                when {
-                    focused -> colors.selectGreen.copy(alpha = 0.16f)
-                    isCurrent -> colors.selectGreen.copy(alpha = 0.1f)
-                    else -> colors.surface
-                },
-                shape,
-            )
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = when {
-                    focused -> colors.selectGreen
-                    isCurrent -> colors.selectGreen
-                    else -> colors.line
-                },
-                shape = shape,
-            )
-            .padding(horizontal = tv.tvSize(14), vertical = tv.tvSize(8)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "%02d".format(index + 1),
-            color = if (focused) colors.selectGreen else colors.dimText,
-            fontSize = tv.tvFont(15),
-            modifier = Modifier.width(tv.tvSize(38)),
-        )
-        HomeCover(url = item.img, size = tv.tvSize(52), corner = 9)
-        Spacer(Modifier.width(tv.tvSize(14)))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = item.name,
-                color = colors.text,
-                fontSize = tv.tvFont(20),
-                fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(tv.tvSize(2)))
-            Text(
-                text = buildString {
-                    append(item.singer.ifBlank { TvText.unknownSinger })
-                    append(TvText.dot)
-                    append(item.albumName.ifBlank { TvText.unknownAlbum })
-                },
-                color = colors.subtext,
-                fontSize = tv.tvFont(14),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        SearchSourceBadge(item.source)
-        Spacer(Modifier.width(tv.tvSize(14)))
-        if (item.interval.isNotBlank()) {
-            Text(
-                text = item.interval,
-                color = colors.dimText,
-                fontSize = tv.tvFont(15),
-                modifier = Modifier.width(tv.tvSize(54)),
-            )
-        }
-        if (isCurrent) {
-            Spacer(Modifier.width(tv.tvSize(8)))
-            Text(
-                text = TvText.nowPlaying,
-                color = colors.selectGreen,
-                fontSize = tv.tvFont(13),
-                maxLines = 1,
-            )
-        }
-        if (focused) {
-            Spacer(Modifier.width(tv.tvSize(8)))
-            Icon(
-                imageVector = Icons.Rounded.PlayArrow,
-                contentDescription = null,
-                tint = colors.selectGreen,
-                modifier = Modifier.size(tv.tvSize(24)),
-            )
+            HomeCover(url = item.img, size = tv.tvSize(52), corner = 9)
+            Spacer(Modifier.width(tv.tvSize(14)))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = highlightedSearchText(
+                        text = item.name,
+                        query = query,
+                        baseColor = if (focused) Color.White else colors.text,
+                        highlightColor = if (focused) Color.White else colors.selectGreen,
+                    ),
+                    fontSize = tv.tvFont(20),
+                    fontWeight = if (focused || isCurrent) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = highlightedSearchText(
+                        text = buildString {
+                            append(item.singer.ifBlank { TvText.unknownSinger })
+                            append(TvText.dot)
+                            append(item.albumName.ifBlank { TvText.unknownAlbum })
+                        },
+                        query = query,
+                        baseColor = if (focused) Color.White.copy(alpha = 0.76f) else colors.subtext,
+                        highlightColor = if (focused) Color.White else colors.selectGreen,
+                    ),
+                    fontSize = tv.tvFont(14),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (showSource) {
+                SearchSourceBadge(item.source, focused)
+                Spacer(Modifier.width(tv.tvSize(12)))
+            }
+            if (isCurrent) {
+                Text(
+                    text = TvText.nowPlaying,
+                    color = if (focused) Color.White.copy(alpha = 0.82f) else colors.selectGreen,
+                    fontSize = tv.tvFont(13),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+                Spacer(Modifier.width(tv.tvSize(12)))
+            }
+            if (item.interval.isNotBlank()) {
+                Text(
+                    text = item.interval,
+                    color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                    fontSize = tv.tvFont(15),
+                    modifier = Modifier.width(tv.tvSize(54)),
+                )
+            }
         }
     }
 }
 
+private fun highlightedSearchText(
+    text: String,
+    query: String,
+    baseColor: Color,
+    highlightColor: Color,
+): AnnotatedString = buildAnnotatedString {
+    val keyword = query.trim()
+    if (keyword.isBlank()) {
+        withStyle(SpanStyle(color = baseColor)) { append(text) }
+        return@buildAnnotatedString
+    }
+    var cursor = 0
+    while (cursor < text.length) {
+        val match = text.indexOf(keyword, cursor, ignoreCase = true)
+        if (match < 0) {
+            withStyle(SpanStyle(color = baseColor)) { append(text.substring(cursor)) }
+            break
+        }
+        if (match > cursor) {
+            withStyle(SpanStyle(color = baseColor)) { append(text.substring(cursor, match)) }
+        }
+        withStyle(
+            SpanStyle(
+                color = highlightColor,
+                fontWeight = FontWeight.Bold,
+            ),
+        ) {
+            append(text.substring(match, match + keyword.length))
+        }
+        cursor = match + keyword.length
+    }
+}
+
 @Composable
-private fun SearchSourceBadge(source: String) {
+private fun SearchSourceBadge(source: String, focused: Boolean) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val shape = RoundedCornerShape(tv.tvSize(6))
     Box(
         modifier = Modifier
-            .background(colors.primarySoft, shape)
+            .background(
+                if (focused) Color.White.copy(alpha = 0.16f) else colors.primarySoft,
+                shape,
+            )
             .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(3)),
     ) {
         Text(
             text = MusicSources.displayName(source),
-            color = colors.primaryHigh,
+            color = if (focused) Color.White else colors.primaryHigh,
             fontSize = tv.tvFont(12),
             maxLines = 1,
         )

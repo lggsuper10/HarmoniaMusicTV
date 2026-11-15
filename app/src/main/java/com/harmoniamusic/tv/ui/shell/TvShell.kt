@@ -5,7 +5,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,10 +12,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -28,6 +33,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.harmoniamusic.tv.ui.components.TvActionButton
 import com.harmoniamusic.tv.ui.components.TvButtonSize
@@ -237,27 +244,56 @@ private fun ExitConfirmDialog(onExit: () -> Unit, onCancel: () -> Unit) {
         ) {
             Column(
                 modifier = Modifier
-                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(16)))
-                    .border(2.dp, colors.focus, RoundedCornerShape(tv.tvSize(16)))
-                    .padding(tv.tvSize(48)),
+                    .width(tv.tvSize(600))
+                    .background(colors.bgElevated, RoundedCornerShape(tv.tvSize(18)))
+                    .padding(horizontal = tv.tvSize(44), vertical = tv.tvSize(38)),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(TvText.exitConfirmTitle, color = colors.text, fontSize = tv.tvFont(30))
-                Spacer(Modifier.height(tv.tvSize(18)))
-                Text(TvText.exitConfirmMessage, color = colors.subtext, fontSize = tv.tvFont(22))
-                Spacer(Modifier.height(tv.tvSize(40)))
                 Row(
-                    modifier = Modifier.focusGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(24)),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(tv.tvSize(46))
+                            .background(colors.surfaceRed, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.Logout,
+                            contentDescription = null,
+                            tint = colors.danger,
+                            modifier = Modifier.size(tv.tvSize(23)),
+                        )
+                    }
+                    Text(
+                        text = TvText.exitConfirmTitle,
+                        color = colors.text,
+                        fontSize = tv.tvFont(32),
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.height(tv.tvSize(10)))
+                Text(
+                    text = TvText.exitConfirmMessage,
+                    color = colors.subtext,
+                    fontSize = tv.tvFont(18),
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(tv.tvSize(32)))
+                Row(
+                    modifier = Modifier.fillMaxWidth().focusGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(16)),
                 ) {
                     TvActionButton(
                         label = TvText.cancelAction,
-                        modifier = Modifier.focusRequester(cancelRequester),
+                        modifier = Modifier.weight(1f).focusRequester(cancelRequester),
                         size = TvButtonSize.LARGE,
                         onClick = onCancel,
                     )
                     TvActionButton(
                         label = TvText.exitApp,
+                        modifier = Modifier.weight(1f),
                         tone = TvButtonTone.DANGER,
                         size = TvButtonSize.LARGE,
                         onClick = onExit,

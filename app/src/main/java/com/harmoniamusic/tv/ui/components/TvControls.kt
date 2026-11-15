@@ -58,6 +58,7 @@ fun TvButtonSurface(
     selected: Boolean = false,
     tone: TvButtonTone = TvButtonTone.NEUTRAL,
     enabled: Boolean = true,
+    containerColor: Color? = null,
     onClick: () -> Unit,
     contentAlignment: Alignment = Alignment.Center,
     content: @Composable BoxScope.(focused: Boolean) -> Unit,
@@ -84,7 +85,7 @@ fun TvButtonSurface(
                     selected -> colors.primarySoft
                     tone == TvButtonTone.PRIMARY -> colors.primarySoft
                     tone == TvButtonTone.DANGER -> colors.danger.copy(alpha = 0.10f)
-                    else -> colors.surface
+                    else -> containerColor ?: colors.surface
                 },
                 shape = resolvedShape,
             ),

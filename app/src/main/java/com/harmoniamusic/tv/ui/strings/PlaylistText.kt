@@ -4,7 +4,7 @@ package com.harmoniamusic.tv.ui.strings
 object PlaylistText {
     const val myPlaylists = "我的歌单"
     const val newPlaylist = "新建歌单"
-    const val createPlaylistHint = "创建一个空歌单，之后可在播放页把歌曲加入其中。"
+    const val createPlaylistHint = "创建一个空歌单"
     const val emptyPlaylists = "还没有我的歌单"
     const val emptyPlaylistsHint = "先新建一个歌单，再在播放页点「加入歌单」。"
     const val addToPlaylist = "加入歌单"

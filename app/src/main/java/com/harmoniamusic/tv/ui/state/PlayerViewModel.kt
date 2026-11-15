@@ -138,9 +138,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         sourceId.takeIf { MusicSources.builtin.containsKey(it) } ?: SOURCE_ALL
 
     private fun chartSourceFor(sourceId: String): String =
-        sourceId.takeIf { MusicSources.builtin.containsKey(it) }
-            ?: MusicSources.builtin.keys.firstOrNull()
-            ?: "wy"
+        // 当前只有网易云提供榜单目录；其他播放源切换时仍保持排行榜可用。
+        sourceId.takeIf { it == "wy" } ?: "wy"
 
     private val _sourceTests =
         MutableStateFlow<List<MusicSources.SourceTestResult>>(emptyList())
@@ -516,7 +515,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     map[source] ?: SearchResult(source, emptyList(), 0, 1, 30)
                 }
                 if (page > 1) {
-                    _tvSearchResults.value = _tvSearchResults.value + merged.list
+                    _tvSearchResults.value = (_tvSearchResults.value + merged.list)
+                        .distinctBy { "${it.name}|${it.singer}" }
                 } else {
                     _tvSearchResults.value = merged.list
                     recordTvSearchHistory(kw)
