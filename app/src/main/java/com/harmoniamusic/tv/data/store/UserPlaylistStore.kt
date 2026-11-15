@@ -83,6 +83,23 @@ class UserPlaylistStore(context: Context) {
         )
     }
 
+    fun moveSong(id: String, item: MusicItem, offset: Int) {
+        if (offset == 0) return
+        save(
+            get().map { playlist ->
+                if (playlist.id != id) return@map playlist
+                val from = playlist.songs.indexOfFirst { it.sameSong(item) }
+                if (from < 0) return@map playlist
+                val to = (from + offset).coerceIn(0, playlist.songs.lastIndex)
+                if (to == from) return@map playlist
+                val songs = playlist.songs.toMutableList()
+                val moved = songs.removeAt(from)
+                songs.add(to, moved)
+                playlist.copy(songs = songs)
+            },
+        )
+    }
+
     fun updateArtwork(items: List<MusicItem>) {
         val artwork = items.filter { !it.img.isNullOrBlank() }
             .associateBy { "${it.source}|${it.songmid}" }

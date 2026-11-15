@@ -353,6 +353,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _userPlaylists.value = userPlaylistStore.get()
     }
 
+    fun moveSongInUserPlaylist(playlistId: String, item: MusicItem, offset: Int) {
+        userPlaylistStore.moveSong(playlistId, item, offset)
+        _userPlaylists.value = userPlaylistStore.get()
+    }
+
     fun addFavorite(item: MusicItem) {
         favoritesStore.add(item)
         _favorites.value = favoritesStore.get()

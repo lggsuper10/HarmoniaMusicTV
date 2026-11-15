@@ -41,11 +41,9 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
@@ -56,9 +54,15 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -134,6 +138,7 @@ import com.harmoniamusic.tv.ui.strings.PlaylistText
 import com.harmoniamusic.tv.ui.components.TvActionButton
 import com.harmoniamusic.tv.ui.components.TvButtonSize
 import com.harmoniamusic.tv.ui.components.TvButtonSurface
+import com.harmoniamusic.tv.ui.components.TvButtonTone
 import com.harmoniamusic.tv.ui.components.TvChoiceChip
 import com.harmoniamusic.tv.ui.components.TvIconButton
 import com.harmoniamusic.tv.ui.theme.LocalTvColors
@@ -145,6 +150,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.core.content.ContextCompat
 import com.harmoniamusic.tv.data.source.countAudioFiles
@@ -188,7 +194,9 @@ fun HomeScreen(
             onBack = { vm.closePlaylist() },
             onPlay = { index -> vm.playList(detailSongs, index, detailTitle) },
             onShuffle = { vm.playShuffled(detailSongs, detailTitle) },
-            onAddToQueue = { vm.addToQueue(detailSongs, detailTitle) },
+            current = current,
+            isPlaying = isPlaying,
+            onFindSongs = onOpenSearch,
         )
         return
     }
@@ -490,165 +498,323 @@ private data class CollectionDetailUiState(
     val loading: Boolean = false,
 )
 
-/** 集合详情：左侧封面与操作，右侧带序号的歌曲列表。 */
+/** 我的音乐内部导航；提升到 TvShell 后，播放页覆盖期间也不会丢失详情层级。 */
+sealed interface MyListDetail {
+    object Favorites : MyListDetail
+    data class Playlist(val id: String) : MyListDetail
+    data class Folder(val uri: String) : MyListDetail
+}
+
+/** 集合详情：左侧封面与标题信息，右侧操作与可滚动歌曲列表。 */
 @Composable
 private fun CollectionDetailPane(
     state: CollectionDetailUiState,
     onBack: () -> Unit,
     onPlay: (Int) -> Unit,
     onShuffle: (() -> Unit)? = null,
-    onAddToQueue: () -> Unit,
+    current: MusicItem? = null,
+    isPlaying: Boolean = false,
+    onFindSongs: (() -> Unit)? = null,
     onRemoveTrack: ((MusicItem) -> Unit)? = null,
+    onMoveTrack: ((MusicItem, Int) -> Unit)? = null,
+    onRenameCollection: ((String) -> Unit)? = null,
+    onDeleteCollection: (() -> Unit)? = null,
     removeTrackLabel: String = TvText.removeFromFavorites,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    val context = LocalContext.current
     val playAllRequester = remember { FocusRequester() }
+    val emptyActionRequester = remember { FocusRequester() }
     val songs = state.songs
+    var pendingRemove by remember(state.title) { mutableStateOf<MusicItem?>(null) }
+    var actionSong by remember(state.title) { mutableStateOf<MusicItem?>(null) }
+    var showCollectionActions by remember(state.title) { mutableStateOf(false) }
+    var showRenameCollection by remember(state.title) { mutableStateOf(false) }
+    var showDeleteCollection by remember(state.title) { mutableStateOf(false) }
+    var pendingFocusKey by remember(state.title) { mutableStateOf<String?>(null) }
+    val rowRequesters = remember(state.title) { mutableMapOf<String, FocusRequester>() }
+    val totalDuration = remember(songs) { collectionDurationLabel(songs) }
+    val detailMeta = remember(state.meta, totalDuration) {
+        when {
+            totalDuration == null -> state.meta
+            state.meta.isBlank() -> totalDuration
+            else -> "${state.meta} · $totalDuration"
+        }
+    }
 
     BackHandler { onBack() }
 
-    LaunchedEffect(state.title) {
+    LaunchedEffect(state.title, state.loading, songs.isEmpty()) {
         withFrameNanos { }
         withFrameNanos { }
-        runCatching { playAllRequester.requestFocus() }
+        val target = if (!state.loading && songs.isEmpty() && onFindSongs != null) {
+            emptyActionRequester
+        } else {
+            playAllRequester
+        }
+        runCatching { target.requestFocus() }
+    }
+    LaunchedEffect(pendingFocusKey, songs) {
+        val target = pendingFocusKey ?: return@LaunchedEffect
+        withFrameNanos { }
+        withFrameNanos { }
+        if (target == PLAY_ALL_FOCUS_KEY) {
+            runCatching { playAllRequester.requestFocus() }
+        } else {
+            runCatching { rowRequesters[target]?.requestFocus() }
+        }
+        pendingFocusKey = null
     }
 
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(24)),
+            .background(colors.bgDeep),
     ) {
-        Column(
-            modifier = Modifier.width(tv.tvSize(430)).fillMaxHeight(),
-        ) {
-            HomePill(
-                label = TvText.back,
-                modifier = Modifier.onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
-                        onBack()
-                        true
-                    } else {
-                        false
-                    }
-                },
-            ) { onBack() }
-            Spacer(Modifier.height(tv.tvSize(20)))
-            HomeCover(url = state.cover, size = tv.tvSize(300))
-            Spacer(Modifier.height(tv.tvSize(18)))
-            Text(
-                text = state.meta,
-                color = colors.dimText,
-                fontSize = tv.tvFont(18),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        if (!state.cover.isNullOrBlank()) {
+            AsyncImage(
+                model = state.cover,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().alpha(if (colors.isDark) 0.12f else 0.08f),
             )
-            Spacer(Modifier.height(tv.tvSize(8)))
-            Text(
-                text = state.title,
-                color = colors.text,
-                fontSize = tv.tvFont(38),
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                colors.bgDeep.copy(alpha = 0.82f),
+                                colors.bgDeep.copy(alpha = 0.94f),
+                                colors.bgDeep,
+                            ),
+                        ),
+                    ),
             )
-            Spacer(Modifier.height(tv.tvSize(22)))
-            Row(
-                modifier = Modifier.onPreviewKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp) {
-                        onBack()
-                        true
-                    } else {
-                        false
-                    }
-                },
-                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
-            ) {
-                HomePill(
-                    label = TvText.playAll,
-                    modifier = Modifier.focusRequester(playAllRequester),
-                ) {
-                    if (songs.isNotEmpty()) onPlay(0)
-                }
-                if (onShuffle != null) {
-                    HomePill(TvText.random) {
-                        if (songs.isNotEmpty()) onShuffle()
-                    }
-                }
-                HomePill(TvText.addToQueue) {
-                    if (songs.isNotEmpty()) {
-                        onAddToQueue()
-                        Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
         }
 
-        Spacer(Modifier.width(tv.tvSize(46)))
-        Box(
-            Modifier
-                .width(1.dp)
-                .fillMaxHeight()
-                .background(colors.surfaceHigh),
-        )
-        Spacer(Modifier.width(tv.tvSize(40)))
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = tv.tvSize(68), vertical = tv.tvSize(18)),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(38)),
+            ) {
+                Column(modifier = Modifier.width(tv.tvSize(260))) {
+                    HomeCover(url = state.cover, size = tv.tvSize(260), corner = 14)
+                    Spacer(Modifier.height(tv.tvSize(14)))
+                    Text(
+                        text = state.title,
+                        color = colors.text,
+                        fontSize = tv.tvFont(32),
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(tv.tvSize(4)))
+                    Text(
+                        text = detailMeta,
+                        color = colors.subtext,
+                        fontSize = tv.tvFont(16),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
 
-        Column(Modifier.weight(1f).fillMaxHeight()) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "歌曲列表",
-                    color = colors.text,
-                    fontSize = tv.tvFont(30),
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = if (state.loading) "加载中…" else "已加载 ${songs.size} 首",
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(18),
-                )
-            }
-            Spacer(Modifier.height(tv.tvSize(8)))
-            Text(
-                text = "OK 播放整个集合 · 点击歌曲从该曲开始",
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
-            )
-            Spacer(Modifier.height(tv.tvSize(10)))
-            if (state.loading && songs.isEmpty()) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = colors.selectGreen,
-                    trackColor = colors.surfaceHigh,
-                )
-            } else if (songs.isEmpty()) {
-                Text(TvText.noMusic, color = colors.dimText, fontSize = tv.tvFont(20))
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(tv.tvSize(4)),
-                ) {
-                    itemsIndexed(songs) { index, song ->
-                        if (onRemoveTrack == null) {
-                            DetailSongRow(index, song) { onPlay(index) }
-                        } else {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                DetailSongRow(
-                                    index = index,
-                                    item = song,
-                                    modifier = Modifier.weight(1f),
-                                ) { onPlay(index) }
-                                Spacer(Modifier.width(tv.tvSize(10)))
-                                SettingActionButton(removeTrackLabel) {
-                                    onRemoveTrack(song)
-                                }
+                Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(tv.tvSize(12)),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CollectionActionButton(
+                            icon = Icons.Rounded.PlayArrow,
+                            label = TvText.playAll,
+                            modifier = Modifier.focusRequester(playAllRequester),
+                            tone = TvButtonTone.PRIMARY,
+                            enabled = songs.isNotEmpty(),
+                        ) {
+                            onPlay(0)
+                        }
+                        if (onShuffle != null) {
+                            CollectionActionButton(
+                                icon = Icons.Rounded.Shuffle,
+                                label = TvText.random,
+                                enabled = songs.isNotEmpty(),
+                            ) {
+                                onShuffle?.invoke()
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        if (onRenameCollection != null || onDeleteCollection != null) {
+                            TvIconButton(
+                                icon = Icons.Rounded.MoreVert,
+                                contentDescription = PlaylistText.collectionActions,
+                                logicalSize = 52,
+                                iconLogicalSize = 26,
+                            ) {
+                                showCollectionActions = true
                             }
                         }
                     }
+
+                    Spacer(Modifier.height(tv.tvSize(14)))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = TvText.songList,
+                            color = colors.text,
+                            fontSize = tv.tvFont(26),
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            text = if (state.loading) TvText.loading else "${songs.size} 首",
+                            color = colors.dimText,
+                            fontSize = tv.tvFont(16),
+                        )
+                    }
+                    Spacer(Modifier.height(tv.tvSize(6)))
+
+                    if (state.loading && songs.isEmpty()) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = colors.selectGreen,
+                            trackColor = colors.surfaceHigh,
+                        )
+                    } else if (songs.isEmpty()) {
+                        CollectionEmptyState(
+                            onFindSongs = onFindSongs,
+                            focusRequester = emptyActionRequester,
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(tv.tvSize(5)),
+                        ) {
+                            itemsIndexed(songs) { index, song ->
+                                val key = songFocusKey(song)
+                                DetailSongRow(
+                                    index = index,
+                                    item = song,
+                                    isCurrent = current?.sameSong(song) == true,
+                                    isPlaying = current?.sameSong(song) == true && isPlaying,
+                                    modifier = Modifier.focusRequester(
+                                        rowRequesters.getOrPut(key) { FocusRequester() },
+                                    ),
+                                    onActionRequest = if (onRemoveTrack != null || onMoveTrack != null) {
+                                        { actionSong = song }
+                                    } else {
+                                        null
+                                    },
+                                ) {
+                                    onPlay(index)
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(tv.tvSize(4)))
+                        Text(
+                            text = if (onRemoveTrack != null || onMoveTrack != null) {
+                                PlaylistText.collectionManageHint
+                            } else {
+                                PlaylistText.collectionPlayHint
+                            },
+                            color = colors.dimText,
+                            fontSize = tv.tvFont(14),
+                        )
+                    }
                 }
             }
         }
+    }
+
+    actionSong?.let { song ->
+        val index = songs.indexOfFirst { it.sameSong(song) }
+        CollectionSongActionDialog(
+            song = song,
+            canMoveUp = onMoveTrack != null && index > 0,
+            canMoveDown = onMoveTrack != null && index >= 0 && index < songs.lastIndex,
+            canRemove = onRemoveTrack != null,
+            removeLabel = removeTrackLabel,
+            onPlay = {
+                actionSong = null
+                if (index >= 0) onPlay(index)
+            },
+            onMoveUp = {
+                actionSong = null
+                pendingFocusKey = songFocusKey(song)
+                onMoveTrack?.invoke(song, -1)
+            },
+            onMoveDown = {
+                actionSong = null
+                pendingFocusKey = songFocusKey(song)
+                onMoveTrack?.invoke(song, 1)
+            },
+            onRemove = {
+                actionSong = null
+                pendingRemove = song
+            },
+            onDismiss = { actionSong = null },
+        )
+    }
+    if (showCollectionActions) {
+        CollectionActionsDialog(
+            title = state.title,
+            canRename = onRenameCollection != null,
+            canDelete = onDeleteCollection != null,
+            onRename = {
+                showCollectionActions = false
+                showRenameCollection = true
+            },
+            onDelete = {
+                showCollectionActions = false
+                showDeleteCollection = true
+            },
+            onDismiss = { showCollectionActions = false },
+        )
+    }
+    if (showRenameCollection) {
+        PlaylistNameDialog(
+            title = PlaylistText.renamePlaylist,
+            initialName = state.title,
+            confirmLabel = PlaylistText.saveAction,
+            onDismiss = { showRenameCollection = false },
+            onConfirm = { name ->
+                showRenameCollection = false
+                onRenameCollection?.invoke(name)
+            },
+        )
+    }
+    if (showDeleteCollection) {
+        ConfirmActionDialog(
+            title = "${PlaylistText.deletePlaylist}「${state.title}」？",
+            message = PlaylistText.deletePlaylistConfirm,
+            confirmLabel = PlaylistText.deletePlaylist,
+            onCancel = { showDeleteCollection = false },
+            onConfirm = {
+                showDeleteCollection = false
+                onDeleteCollection?.invoke()
+            },
+        )
+    }
+    pendingRemove?.let { song ->
+        val index = songs.indexOfFirst { it.sameSong(song) }
+        val nextSong = songs.getOrNull(index + 1) ?: songs.getOrNull(index - 1)
+        ConfirmActionDialog(
+            title = removeTrackLabel,
+            message = PlaylistText.collectionRemoveConfirm.replace("{name}", song.name),
+            confirmLabel = removeTrackLabel,
+            onCancel = { pendingRemove = null },
+            onConfirm = {
+                pendingFocusKey = nextSong?.let(::songFocusKey) ?: PLAY_ALL_FOCUS_KEY
+                onRemoveTrack?.invoke(song)
+                pendingRemove = null
+            },
+        )
     }
 }
 
@@ -658,62 +824,469 @@ private fun DetailSongRow(
     index: Int,
     item: MusicItem,
     modifier: Modifier = Modifier,
+    isCurrent: Boolean = false,
+    isPlaying: Boolean = false,
     onFocused: (() -> Unit)? = null,
+    onActionRequest: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     var focused by remember { mutableStateOf(false) }
-    Row(
+    var longPressTriggered by remember { mutableStateOf(false) }
+    var managePending by remember { mutableStateOf(false) }
+    var suppressBackUntil by remember { mutableStateOf(0L) }
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.015f else 1f,
+        animationSpec = tween(120),
+        label = "collectionSongScale",
+    )
+    TvButtonSurface(
         modifier = modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) onFocused?.invoke()
+                if (!it.isFocused) {
+                    longPressTriggered = false
+                    managePending = false
+                }
             }
-            .clickable { onClick() }
-            .background(
-                if (focused) colors.selectGreen.copy(alpha = 0.16f) else Color.Transparent,
-                RoundedCornerShape(tv.tvSize(8)),
-            )
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = colors.selectGreen,
-                shape = RoundedCornerShape(tv.tvSize(8)),
-            )
-            .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(10)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "%02d".format(index + 1),
-            color = if (focused) colors.selectGreen else colors.dimText,
-            fontSize = tv.tvFont(18),
-            modifier = Modifier.width(tv.tvSize(54)),
-        )
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = item.name,
-                color = colors.text,
-                fontSize = tv.tvFont(21),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = item.singer.ifBlank { TvText.unknownSinger },
-                color = colors.subtext,
-                fontSize = tv.tvFont(16),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            .onPreviewKeyEvent { event ->
+                if (onActionRequest == null) return@onPreviewKeyEvent false
+                if (event.key == Key.Back && SystemClock.uptimeMillis() < suppressBackUntil) {
+                    return@onPreviewKeyEvent true
+                }
+                val confirmKey = event.key == Key.DirectionCenter || event.key == Key.Enter
+                when {
+                    event.type == KeyEventType.KeyDown && confirmKey -> {
+                        if (event.nativeKeyEvent.repeatCount > 0) {
+                            if (!longPressTriggered) {
+                                longPressTriggered = true
+                                managePending = true
+                            }
+                            true
+                        } else {
+                            longPressTriggered = false
+                            managePending = false
+                            false
+                        }
+                    }
+                    event.type == KeyEventType.KeyUp && confirmKey && managePending -> {
+                        longPressTriggered = false
+                        managePending = false
+                        suppressBackUntil = SystemClock.uptimeMillis() + 500
+                        onActionRequest()
+                        true
+                    }
+                    event.type == KeyEventType.KeyUp && event.key == Key.Menu -> {
+                        onActionRequest()
+                        true
+                    }
+                    else -> false
+                }
+            },
+        onClick = onClick,
+        selected = isCurrent,
+        contentAlignment = Alignment.CenterStart,
+    ) { surfaceFocused ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(9)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.width(tv.tvSize(54)),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                when {
+                    isCurrent && isPlaying -> PlayingBars(
+                        color = if (surfaceFocused) Color.White else colors.selectGreen,
+                    )
+                    isCurrent -> Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = TvText.nowPlaying,
+                        tint = if (surfaceFocused) Color.White else colors.selectGreen,
+                        modifier = Modifier.size(tv.tvSize(20)),
+                    )
+                    else -> Text(
+                        text = "%02d".format(index + 1),
+                        color = if (surfaceFocused) Color.White.copy(alpha = 0.84f) else colors.dimText,
+                        fontSize = tv.tvFont(18),
+                    )
+                }
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = item.name,
+                    color = when {
+                        surfaceFocused -> Color.White
+                        isCurrent -> colors.selectGreen
+                        else -> colors.text
+                    },
+                    fontSize = tv.tvFont(20),
+                    fontWeight = if (surfaceFocused || isCurrent) FontWeight.Bold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = buildString {
+                        append(item.singer.ifBlank { TvText.unknownSinger })
+                        if (item.albumName.isNotBlank()) {
+                            append(TvText.dot)
+                            append(item.albumName)
+                        }
+                    },
+                    color = if (surfaceFocused) Color.White.copy(alpha = 0.78f) else colors.subtext,
+                    fontSize = tv.tvFont(15),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (isCurrent) {
+                Text(
+                    text = TvText.nowPlaying,
+                    color = if (surfaceFocused) Color.White.copy(alpha = 0.82f) else colors.selectGreen,
+                    fontSize = tv.tvFont(13),
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.width(tv.tvSize(12)))
+            }
+            if (item.interval.isNotBlank()) {
+                Text(
+                    text = item.interval,
+                    color = if (surfaceFocused) Color.White.copy(alpha = 0.78f) else colors.dimText,
+                    fontSize = tv.tvFont(16),
+                )
+            }
         }
-        if (item.interval.isNotBlank()) {
+    }
+}
+
+@Composable
+private fun CollectionActionButton(
+    icon: ImageVector,
+    label: String,
+    modifier: Modifier = Modifier,
+    tone: TvButtonTone = TvButtonTone.NEUTRAL,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    TvButtonSurface(
+        modifier = modifier.height(tv.tvSize(52)),
+        tone = tone,
+        enabled = enabled,
+        onClick = onClick,
+    ) { focused ->
+        Row(
+            modifier = Modifier.padding(horizontal = tv.tvSize(20), vertical = tv.tvSize(12)),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(tv.tvSize(9)),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = when {
+                    !enabled -> colors.muted
+                    focused -> Color.White
+                    tone == TvButtonTone.DANGER -> colors.danger
+                    tone == TvButtonTone.PRIMARY -> colors.selectGreen
+                    else -> colors.subtext
+                },
+                modifier = Modifier.size(tv.tvSize(22)),
+            )
             Text(
-                text = item.interval,
-                color = colors.dimText,
-                fontSize = tv.tvFont(17),
+                text = label,
+                color = when {
+                    !enabled -> colors.muted
+                    focused -> Color.White
+                    tone == TvButtonTone.DANGER -> colors.danger
+                    tone == TvButtonTone.PRIMARY -> colors.selectGreen
+                    else -> colors.subtext
+                },
+                fontSize = tv.tvFont(18),
+                fontWeight = if (focused || tone == TvButtonTone.PRIMARY) {
+                    FontWeight.Bold
+                } else {
+                    FontWeight.Medium
+                },
+                maxLines = 1,
             )
         }
     }
+}
+
+@Composable
+private fun CollectionEmptyState(
+    onFindSongs: (() -> Unit)?,
+    focusRequester: FocusRequester? = null,
+    modifier: Modifier = Modifier,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = Icons.Rounded.MusicNote,
+                contentDescription = null,
+                tint = colors.dimText,
+                modifier = Modifier.size(tv.tvSize(44)),
+            )
+            Spacer(Modifier.height(tv.tvSize(12)))
+            Text(
+                text = PlaylistText.collectionEmptyTitle,
+                color = colors.text,
+                fontSize = tv.tvFont(24),
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(tv.tvSize(6)))
+            Text(
+                text = PlaylistText.collectionEmptyHint,
+                color = colors.dimText,
+                fontSize = tv.tvFont(16),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (onFindSongs != null) {
+                Spacer(Modifier.height(tv.tvSize(16)))
+                CollectionActionButton(
+                    icon = Icons.Rounded.Search,
+                    label = PlaylistText.collectionFindSongs,
+                    modifier = if (focusRequester != null) {
+                        Modifier.focusRequester(focusRequester)
+                    } else {
+                        Modifier
+                    },
+                    tone = TvButtonTone.PRIMARY,
+                    onClick = onFindSongs,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollectionSongActionDialog(
+    song: MusicItem,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    canRemove: Boolean,
+    removeLabel: String,
+    onPlay: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val firstRequester = remember { FocusRequester() }
+    var interactionReady by remember(song.source, song.songmid) { mutableStateOf(false) }
+
+    LaunchedEffect(song.source, song.songmid) {
+        delay(320)
+        interactionReady = true
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching { firstRequester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = { if (interactionReady) onDismiss() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(560))
+                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(16)))
+                    .padding(tv.tvSize(32)),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+            ) {
+                Text(
+                    text = song.name,
+                    color = colors.text,
+                    fontSize = tv.tvFont(28),
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = song.singer.ifBlank { TvText.unknownSinger },
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(16),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(tv.tvSize(4)))
+                CollectionActionButton(
+                    icon = Icons.Rounded.PlayArrow,
+                    label = TvText.play,
+                    modifier = Modifier.fillMaxWidth().focusRequester(firstRequester),
+                    tone = TvButtonTone.PRIMARY,
+                    onClick = onPlay,
+                )
+                if (canMoveUp || canMoveDown) {
+                    if (canMoveUp) {
+                        CollectionActionButton(
+                            icon = Icons.Rounded.KeyboardArrowUp,
+                            label = PlaylistText.moveUp,
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = onMoveUp,
+                        )
+                    }
+                    if (canMoveDown) {
+                        CollectionActionButton(
+                            icon = Icons.Rounded.KeyboardArrowDown,
+                            label = PlaylistText.moveDown,
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = onMoveDown,
+                        )
+                    }
+                }
+                if (canRemove) {
+                    CollectionActionButton(
+                        icon = Icons.Rounded.Delete,
+                        label = removeLabel,
+                        modifier = Modifier.fillMaxWidth(),
+                        tone = TvButtonTone.DANGER,
+                        onClick = onRemove,
+                    )
+                }
+                CollectionActionButton(
+                    icon = Icons.Rounded.Close,
+                    label = TvText.cancelAction,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onDismiss,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollectionActionsDialog(
+    title: String,
+    canRename: Boolean,
+    canDelete: Boolean,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = LocalTvColors.current
+    val tv = LocalTvMetrics.current
+    val firstRequester = remember { FocusRequester() }
+    var interactionReady by remember(title) { mutableStateOf(false) }
+
+    LaunchedEffect(title) {
+        delay(320)
+        interactionReady = true
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching { firstRequester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = { if (interactionReady) onDismiss() },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(colors.overlay),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(tv.tvSize(520))
+                    .background(colors.bgWarm, RoundedCornerShape(tv.tvSize(16)))
+                    .padding(tv.tvSize(32)),
+                verticalArrangement = Arrangement.spacedBy(tv.tvSize(10)),
+            ) {
+                Text(
+                    text = PlaylistText.collectionActions,
+                    color = colors.text,
+                    fontSize = tv.tvFont(28),
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = title,
+                    color = colors.dimText,
+                    fontSize = tv.tvFont(16),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (canRename) {
+                    CollectionActionButton(
+                        icon = Icons.Rounded.Edit,
+                        label = PlaylistText.renamePlaylist,
+                        modifier = Modifier.fillMaxWidth().focusRequester(firstRequester),
+                        onClick = onRename,
+                    )
+                }
+                if (canDelete) {
+                    CollectionActionButton(
+                        icon = Icons.Rounded.Delete,
+                        label = PlaylistText.deletePlaylist,
+                        modifier = Modifier.fillMaxWidth().let {
+                            if (!canRename) it.focusRequester(firstRequester) else it
+                        },
+                        tone = TvButtonTone.DANGER,
+                        onClick = onDelete,
+                    )
+                }
+                CollectionActionButton(
+                    icon = Icons.Rounded.Close,
+                    label = TvText.cancelAction,
+                    modifier = Modifier.fillMaxWidth().let {
+                        if (!canRename && !canDelete) it.focusRequester(firstRequester) else it
+                    },
+                    onClick = onDismiss,
+                )
+            }
+        }
+    }
+}
+
+private const val PLAY_ALL_FOCUS_KEY = "__play_all__"
+
+private fun songFocusKey(item: MusicItem): String = "${item.source}|${item.songmid}"
+
+private fun MusicItem.sameSong(other: MusicItem): Boolean =
+    source == other.source && songmid == other.songmid
+
+private fun collectionDurationLabel(songs: List<MusicItem>): String? {
+    val totalSeconds = songs.sumOf { songDurationSeconds(it.interval) }
+    if (totalSeconds <= 0) return null
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
+}
+
+private fun songDurationSeconds(interval: String): Int {
+    val parts = interval.split(":")
+    val minutes = parts.getOrNull(0)?.toIntOrNull() ?: return 0
+    val seconds = parts.getOrNull(1)?.toIntOrNull() ?: return 0
+    return minutes * 60 + seconds
 }
 
 @Composable
@@ -1557,18 +2130,21 @@ private fun PlayerUtilityButton(
     Column(
         modifier = modifier
             .width(tv.tvSize(76))
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
             .padding(vertical = tv.tvSize(2)),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
             modifier = Modifier
                 .size(tv.tvSize(44))
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    shape = CircleShape
+                    clip = true
+                }
+                .clip(CircleShape)
+                .onFocusChanged { focused = it.isFocused }
+                .clickable { onClick() }
                 .background(
                     when {
                         focused -> colors.selectGreen
@@ -1964,20 +2540,23 @@ private fun ControlIconButton(
         label = "playerTransportScale",
     )
     Column(
-        modifier = modifier
+        modifier = Modifier
             .width(tv.tvSize(if (primary) 100 else 82))
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
             .padding(vertical = tv.tvSize(2)),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
-            modifier = Modifier
+            modifier = modifier
                 .size(tv.tvSize(buttonSize))
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    shape = CircleShape
+                    clip = true
+                }
+                .clip(CircleShape)
+                .onFocusChanged { focused = it.isFocused }
+                .clickable { onClick() }
                 .background(
                     when {
                         focused -> colors.selectGreen
@@ -2152,7 +2731,7 @@ fun ChartsScreen(
                 .padding(horizontal = tv.tvSize(12), vertical = tv.tvSize(9)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HomeCover(url = selectedCover, size = tv.tvSize(60), corner = 9)
+            HomeCover(url = selectedCover, size = tv.tvSize(68), corner = 9)
             Spacer(Modifier.width(tv.tvSize(12)))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -2355,7 +2934,7 @@ private fun ChartBoardCard(
             board = board,
             index = index,
             cover = cover,
-            modifier = Modifier.fillMaxWidth().height(tv.tvSize(78)),
+            modifier = Modifier.fillMaxWidth().height(tv.tvSize(86)),
         )
         Spacer(Modifier.height(tv.tvSize(4)))
         Text(
@@ -2393,11 +2972,17 @@ private fun ChartBoardArtwork(
         3 -> colors.green
         else -> colors.blue
     }
+    val fallbackGradient = if (colors.isDark) {
+        listOf(accent.copy(alpha = 0.72f), colors.bgWarm, colors.bgDeep)
+    } else {
+        // 浅色模式不能让白字落在接近白色的渐变上；用强调色过渡到深色文字色。
+        listOf(accent, accent.copy(alpha = 0.82f), colors.text.copy(alpha = 0.82f))
+    }
     Box(
         modifier = modifier
             .clip(shape)
             .background(
-                Brush.linearGradient(listOf(accent.copy(alpha = 0.72f), colors.bgWarm, colors.bgDeep)),
+                Brush.linearGradient(fallbackGradient),
             ),
     ) {
         if (!cover.isNullOrBlank()) {
@@ -2420,12 +3005,12 @@ private fun ChartBoardArtwork(
             Icon(
                 imageVector = Icons.Rounded.MusicNote,
                 contentDescription = null,
-                tint = Color.White.copy(alpha = 0.2f),
+                tint = Color.White.copy(alpha = 0.34f),
                 modifier = Modifier.align(Alignment.Center).size(tv.tvSize(38)),
             )
             Text(
                 text = board.name.removeSuffix("榜").take(2),
-                color = Color.White.copy(alpha = 0.86f),
+                color = Color.White,
                 fontSize = tv.tvFont(26),
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.BottomStart).padding(tv.tvSize(9)),
@@ -2507,7 +3092,7 @@ private fun ChartSongRow(
             fontWeight = if (topThree) FontWeight.Bold else FontWeight.Normal,
             modifier = Modifier.width(tv.tvSize(42)),
         )
-        HomeCover(url = item.img, size = tv.tvSize(36), corner = 7)
+        HomeCover(url = item.img, size = tv.tvSize(44), corner = 7)
         Spacer(Modifier.width(tv.tvSize(10)))
         Column(Modifier.weight(1f)) {
             Text(
@@ -2544,6 +3129,9 @@ private fun ChartSongRow(
 @Composable
 fun MyListScreen(
     vm: PlayerViewModel = viewModel(),
+    detail: MyListDetail? = null,
+    onDetailChange: (MyListDetail?) -> Unit = {},
+    onOpenSearch: () -> Unit = {},
     onFocusNav: () -> Unit = {},
 ) {
     val colors = LocalTvColors.current
@@ -2552,24 +3140,27 @@ fun MyListScreen(
     val localFolders by vm.localFolders.collectAsState()
     val recent by vm.recent.collectAsState()
     val current by vm.current.collectAsState()
+    val isPlaying by vm.isPlaying.collectAsState()
     val userPlaylists by vm.userPlaylists.collectAsState()
 
     val favoritesRequester = remember { FocusRequester() }
     val context = LocalContext.current
     var showPicker by remember { mutableStateOf(false) }
-    var openFolder by remember { mutableStateOf<LocalFolder?>(null) }
-    var showFavorites by rememberSaveable { mutableStateOf(false) }
     var actionFolder by remember { mutableStateOf<LocalFolder?>(null) }
     var removeFolder by remember { mutableStateOf<LocalFolder?>(null) }
     var showManager by remember { mutableStateOf(false) }
     var hadDetail by remember { mutableStateOf(false) }
-    var openUserPlaylistId by remember { mutableStateOf<String?>(null) }
     var showCreatePlaylist by remember { mutableStateOf(false) }
     var playlistAction by remember { mutableStateOf<UserPlaylist?>(null) }
     var renamePlaylist by remember { mutableStateOf<UserPlaylist?>(null) }
     var deletePlaylist by remember { mutableStateOf<UserPlaylist?>(null) }
     var recentToRemove by remember { mutableStateOf<MusicItem?>(null) }
     var showClearRecent by remember { mutableStateOf(false) }
+    val showFavorites = detail is MyListDetail.Favorites
+    val openUserPlaylistId = (detail as? MyListDetail.Playlist)?.id
+    val openFolder = (detail as? MyListDetail.Folder)?.let { route ->
+        localFolders.firstOrNull { it.uri == route.uri }
+    }
 
     LaunchedEffect(Unit) {
         vm.loadFavorites()
@@ -2577,8 +3168,8 @@ fun MyListScreen(
         vm.loadRecent()
         vm.loadUserPlaylists()
     }
-    LaunchedEffect(showFavorites, openFolder, openUserPlaylistId) {
-        if (showFavorites || openFolder != null || openUserPlaylistId != null) {
+    LaunchedEffect(detail) {
+        if (detail != null) {
             hadDetail = true
         } else if (hadDetail) {
             withFrameNanos { }
@@ -2602,15 +3193,12 @@ fun MyListScreen(
                 cover = favorites.firstOrNull()?.img,
                 songs = favorites,
             ),
-            onBack = { showFavorites = false },
+            onBack = { onDetailChange(null) },
             onPlay = { index -> vm.playList(favorites, index, TvText.favorites) },
             onShuffle = { vm.playShuffled(favorites, TvText.favorites) },
-            onAddToQueue = {
-                if (favorites.isNotEmpty()) {
-                    vm.addToQueue(favorites, TvText.favorites)
-                    Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
-                }
-            },
+            current = current,
+            isPlaying = isPlaying,
+            onFindSongs = onOpenSearch,
             onRemoveTrack = { vm.removeFavorite(it) },
         )
         return
@@ -2625,16 +3213,19 @@ fun MyListScreen(
                 cover = playlist.songs.firstOrNull()?.img,
                 songs = playlist.songs,
             ),
-            onBack = { openUserPlaylistId = null },
+            onBack = { onDetailChange(null) },
             onPlay = { index -> vm.playList(playlist.songs, index, playlist.name) },
             onShuffle = { vm.playShuffled(playlist.songs, playlist.name) },
-            onAddToQueue = {
-                if (playlist.songs.isNotEmpty()) {
-                    vm.addToQueue(playlist.songs, playlist.name)
-                    Toast.makeText(context, "已加入播放队列", Toast.LENGTH_SHORT).show()
-                }
-            },
+            current = current,
+            isPlaying = isPlaying,
+            onFindSongs = onOpenSearch,
             onRemoveTrack = { vm.removeSongFromUserPlaylist(playlist.id, it) },
+            onMoveTrack = { item, offset -> vm.moveSongInUserPlaylist(playlist.id, item, offset) },
+            onRenameCollection = { name -> vm.renameUserPlaylist(playlist.id, name) },
+            onDeleteCollection = {
+                vm.removeUserPlaylist(playlist.id)
+                onDetailChange(null)
+            },
             removeTrackLabel = PlaylistText.removeFromPlaylist,
         )
         return
@@ -2648,19 +3239,11 @@ fun MyListScreen(
                 cover = folder.cover ?: folder.songs.firstOrNull()?.img,
                 songs = folder.songs,
             ),
-            onBack = { openFolder = null },
+            onBack = { onDetailChange(null) },
             onPlay = { index -> vm.playList(folder.songs, index, folder.name) },
             onShuffle = { vm.playShuffled(folder.songs, folder.name) },
-            onAddToQueue = {
-                if (folder.songs.isNotEmpty()) {
-                    vm.addToQueue(folder.songs, folder.name)
-                    Toast.makeText(
-                        context,
-                        "已将 ${folder.name} 加入播放队列（${folder.songs.size} 首）",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
-            },
+            current = current,
+            isPlaying = isPlaying,
         )
         return
     }
@@ -2731,7 +3314,7 @@ fun MyListScreen(
         item {
             UserPlaylistRail(
                 playlists = userPlaylists,
-                onOpen = { openUserPlaylistId = it.id },
+                onOpen = { onDetailChange(MyListDetail.Playlist(it.id)) },
                 onManage = { playlistAction = it },
                 onCreate = { showCreatePlaylist = true },
             )
@@ -2749,8 +3332,8 @@ fun MyListScreen(
                 favorites = favorites,
                 folders = localFolders,
                 favoritesModifier = Modifier.focusRequester(favoritesRequester),
-                onOpenFavorites = { showFavorites = true },
-                onOpenFolder = { openFolder = it },
+                onOpenFavorites = { onDetailChange(MyListDetail.Favorites) },
+                onOpenFolder = { onDetailChange(MyListDetail.Folder(it.uri)) },
                 onManageFolder = { actionFolder = it },
                 onAddFolder = {
                     if (hasStoragePermission(context)) {
@@ -2832,7 +3415,7 @@ fun MyListScreen(
             onDismiss = { playlistAction = null },
             onOpen = {
                 playlistAction = null
-                openUserPlaylistId = playlist.id
+                onDetailChange(MyListDetail.Playlist(playlist.id))
             },
             onRename = {
                 playlistAction = null
@@ -2867,7 +3450,7 @@ fun MyListScreen(
             onCancel = { deletePlaylist = null },
             onConfirm = {
                 vm.removeUserPlaylist(playlist.id)
-                if (openUserPlaylistId == playlist.id) openUserPlaylistId = null
+                if (openUserPlaylistId == playlist.id) onDetailChange(null)
                 deletePlaylist = null
                 Toast.makeText(context, "歌单已删除", Toast.LENGTH_SHORT).show()
             },
@@ -2933,7 +3516,7 @@ fun MyListScreen(
             onDismiss = { actionFolder = null },
             onOpen = {
                 actionFolder = null
-                openFolder = folder
+                onDetailChange(MyListDetail.Folder(folder.uri))
             },
             onAddToQueue = {
                 actionFolder = null
@@ -2994,7 +3577,6 @@ private fun UserPlaylistRail(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun UserPlaylistCard(
     playlist: UserPlaylist,
@@ -3003,31 +3585,43 @@ private fun UserPlaylistCard(
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     var longPressTriggered by remember { mutableStateOf(false) }
+    var managePending by remember { mutableStateOf(false) }
+    var suppressBackUntil by remember { mutableStateOf(0L) }
     val shape = RoundedCornerShape(tv.tvSize(12))
-    Column(
+    TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(166))
-            .onFocusChanged { focused = it.isFocused }
-            .combinedClickable(onClick = onOpen, onLongClick = onManage)
-            .onKeyEvent { event ->
+            .onFocusChanged {
+                if (!it.isFocused) {
+                    longPressTriggered = false
+                    managePending = false
+                }
+            }
+            .onPreviewKeyEvent { event ->
+                if (event.key == Key.Back && SystemClock.uptimeMillis() < suppressBackUntil) {
+                    return@onPreviewKeyEvent true
+                }
                 val confirmKey = event.key == Key.DirectionCenter || event.key == Key.Enter
                 when {
                     event.type == KeyEventType.KeyDown && confirmKey -> {
                         if (event.nativeKeyEvent.repeatCount > 0) {
                             if (!longPressTriggered) {
                                 longPressTriggered = true
-                                onManage()
+                                managePending = true
                             }
                             true
                         } else {
                             longPressTriggered = false
+                            managePending = false
                             false
                         }
                     }
-                    event.type == KeyEventType.KeyUp && confirmKey && longPressTriggered -> {
+                    event.type == KeyEventType.KeyUp && confirmKey && managePending -> {
                         longPressTriggered = false
+                        managePending = false
+                        suppressBackUntil = SystemClock.uptimeMillis() + 500
+                        onManage()
                         true
                     }
                     event.type == KeyEventType.KeyUp && event.key == Key.Menu -> {
@@ -3036,44 +3630,46 @@ private fun UserPlaylistCard(
                     }
                     else -> false
                 }
+            },
+        shape = shape,
+        onClick = onOpen,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Column(modifier = Modifier.padding(tv.tvSize(8))) {
+            Box {
+                HomeCover(url = playlist.songs.firstOrNull()?.img, size = tv.tvSize(146), corner = 10)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(tv.tvSize(8))
+                        .background(Color.Black.copy(alpha = 0.62f), CircleShape)
+                        .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(4)),
+                ) {
+                    Text(
+                        text = "${playlist.songs.size}",
+                        color = Color.White,
+                        fontSize = tv.tvFont(14),
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
-            .background(if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface, shape)
-            .border(if (focused) 3.dp else 0.dp, colors.selectGreen, shape)
-            .padding(tv.tvSize(8)),
-    ) {
-        Box {
-            HomeCover(url = playlist.songs.firstOrNull()?.img, size = tv.tvSize(146), corner = 10)
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(tv.tvSize(8))
-                    .background(Color.Black.copy(alpha = 0.62f), CircleShape)
-                    .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(4)),
-            ) {
-                Text(
-                    text = "${playlist.songs.size}",
-                    color = Color.White,
-                    fontSize = tv.tvFont(14),
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+            Spacer(Modifier.height(tv.tvSize(6)))
+            Text(
+                text = playlist.name,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(18),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = if (playlist.songs.isEmpty()) PlaylistText.emptyPlaylists else "${playlist.songs.size} 首 · 长按管理",
+                color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                fontSize = tv.tvFont(14),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Spacer(Modifier.height(tv.tvSize(6)))
-        Text(
-            text = playlist.name,
-            color = colors.text,
-            fontSize = tv.tvFont(18),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = if (playlist.songs.isEmpty()) PlaylistText.emptyPlaylists else "${playlist.songs.size} 首 · 长按管理",
-            color = colors.dimText,
-            fontSize = tv.tvFont(14),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -3081,47 +3677,41 @@ private fun UserPlaylistCard(
 private fun AddPlaylistCard(onClick: () -> Unit) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(12))
-    Column(
-        modifier = Modifier
-            .width(tv.tvSize(166))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface, shape)
-            .border(
-                width = if (focused) 3.dp else 2.dp,
-                color = if (focused) colors.selectGreen else colors.border,
-                shape = shape,
-            )
-            .padding(tv.tvSize(8)),
-    ) {
-        Box(
-            modifier = Modifier.size(tv.tvSize(146)),
-            contentAlignment = Alignment.Center,
-        ) {
+    TvButtonSurface(
+        modifier = Modifier.width(tv.tvSize(166)),
+        shape = shape,
+        onClick = onClick,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Column(modifier = Modifier.padding(tv.tvSize(8))) {
+            Box(
+                modifier = Modifier.size(tv.tvSize(146)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "+",
+                    color = if (focused) Color.White else colors.dimText,
+                    fontSize = tv.tvFont(54),
+                )
+            }
+            Spacer(Modifier.height(tv.tvSize(6)))
             Text(
-                text = "+",
-                color = if (focused) colors.selectGreen else colors.dimText,
-                fontSize = tv.tvFont(54),
+                text = PlaylistText.newPlaylist,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(18),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = PlaylistText.createPlaylistHint,
+                color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                fontSize = tv.tvFont(13),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.height(tv.tvSize(6)))
-        Text(
-            text = PlaylistText.newPlaylist,
-            color = colors.text,
-            fontSize = tv.tvFont(18),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = PlaylistText.createPlaylistHint,
-            color = colors.dimText,
-            fontSize = tv.tvFont(13),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -3169,51 +3759,48 @@ private fun FavoriteCollectionCard(
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    Column(
+    val shape = RoundedCornerShape(tv.tvSize(12))
+    TvButtonSurface(
         modifier = modifier
-            .width(tv.tvSize(166))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(
-                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
-                RoundedCornerShape(tv.tvSize(12)),
-            )
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = colors.selectGreen,
-                shape = RoundedCornerShape(tv.tvSize(12)),
-            )
-            .padding(tv.tvSize(8)),
-    ) {
-        Box {
-            HomeCover(url = cover, size = tv.tvSize(146), corner = 10)
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(tv.tvSize(8))
-                    .background(Color.Black.copy(alpha = 0.58f), CircleShape)
-                    .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(4)),
-            ) {
-                Text("\u2665", color = colors.selectGreen, fontSize = tv.tvFont(15))
+            .width(tv.tvSize(166)),
+        shape = shape,
+        onClick = onClick,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Column(modifier = Modifier.padding(tv.tvSize(8))) {
+            Box {
+                HomeCover(url = cover, size = tv.tvSize(146), corner = 10)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(tv.tvSize(8))
+                        .background(Color.Black.copy(alpha = 0.58f), CircleShape)
+                        .padding(horizontal = tv.tvSize(8), vertical = tv.tvSize(4)),
+                ) {
+                    Text(
+                        text = "\u2665",
+                        color = if (focused) Color.White else colors.selectGreen,
+                        fontSize = tv.tvFont(15),
+                    )
+                }
             }
+            Spacer(Modifier.height(tv.tvSize(6)))
+            Text(
+                text = TvText.favorites,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(18),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = if (count > 0) "$count 首 · 收藏" else "暂无收藏",
+                color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                fontSize = tv.tvFont(14),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Spacer(Modifier.height(tv.tvSize(6)))
-        Text(
-            text = TvText.favorites,
-            color = colors.text,
-            fontSize = tv.tvFont(18),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = if (count > 0) "$count 首 · 收藏" else "暂无收藏",
-            color = colors.dimText,
-            fontSize = tv.tvFont(14),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -3241,7 +3828,6 @@ private fun RecentTrackRail(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecentTrackCard(
     item: MusicItem,
@@ -3251,31 +3837,43 @@ private fun RecentTrackCard(
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
     var longPressTriggered by remember { mutableStateOf(false) }
+    var managePending by remember { mutableStateOf(false) }
+    var suppressBackUntil by remember { mutableStateOf(0L) }
     val cardShape = RoundedCornerShape(tv.tvSize(12))
-    Box(
+    TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(170))
-            .onFocusChanged { focused = it.isFocused }
-            .combinedClickable(onClick = onClick, onLongClick = onRemoveRequest)
-            .onKeyEvent { event ->
+            .onFocusChanged {
+                if (!it.isFocused) {
+                    longPressTriggered = false
+                    managePending = false
+                }
+            }
+            .onPreviewKeyEvent { event ->
+                if (event.key == Key.Back && SystemClock.uptimeMillis() < suppressBackUntil) {
+                    return@onPreviewKeyEvent true
+                }
                 val confirmKey = event.key == Key.DirectionCenter || event.key == Key.Enter
                 when {
                     event.type == KeyEventType.KeyDown && confirmKey -> {
                         if (event.nativeKeyEvent.repeatCount > 0) {
                             if (!longPressTriggered) {
                                 longPressTriggered = true
-                                onRemoveRequest()
+                                managePending = true
                             }
                             true
                         } else {
                             longPressTriggered = false
+                            managePending = false
                             false
                         }
                     }
-                    event.type == KeyEventType.KeyUp && confirmKey && longPressTriggered -> {
+                    event.type == KeyEventType.KeyUp && confirmKey && managePending -> {
                         longPressTriggered = false
+                        managePending = false
+                        suppressBackUntil = SystemClock.uptimeMillis() + 500
+                        onRemoveRequest()
                         true
                     }
                     event.type == KeyEventType.KeyUp && event.key == Key.Menu -> {
@@ -3284,76 +3882,71 @@ private fun RecentTrackCard(
                     }
                     else -> false
                 }
-            }
-            .background(
-                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
-                cardShape,
-            )
-            .border(
-                width = when {
-                    focused -> 3.dp
-                    isCurrent -> 2.dp
-                    else -> 0.dp
-                },
-                color = colors.selectGreen,
-                shape = cardShape,
-            )
-            .padding(tv.tvSize(6)),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(tv.tvSize(158))
-                .clip(RoundedCornerShape(tv.tvSize(10))),
-        ) {
-            HomeCover(url = item.img, size = tv.tvSize(158), corner = 10)
+            },
+        shape = cardShape,
+        selected = isCurrent,
+        onClick = onClick,
+        contentAlignment = Alignment.CenterStart,
+    ) { _ ->
+        Box(modifier = Modifier.padding(tv.tvSize(6))) {
             Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.28f), Color.Black.copy(alpha = 0.9f)),
-                        ),
-                    ),
-            )
-            if (isCurrent) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(tv.tvSize(9))
-                        .background(colors.selectGreen, CircleShape)
-                        .padding(horizontal = tv.tvSize(7), vertical = tv.tvSize(6)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    PlayingBars(color = colors.bgDeep)
-                }
-            }
-            Column(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .padding(horizontal = tv.tvSize(11), vertical = tv.tvSize(10)),
+                    .size(tv.tvSize(158))
+                    .clip(RoundedCornerShape(tv.tvSize(10))),
             ) {
-                Text(
-                    text = item.name,
-                    color = Color.White,
-                    fontSize = tv.tvFont(17),
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                HomeCover(url = item.img, size = tv.tvSize(158), corner = 10)
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = 0.28f),
+                                    Color.Black.copy(alpha = 0.9f),
+                                ),
+                            ),
+                        ),
                 )
-                Text(
-                    text = item.singer.ifBlank { TvText.unknownSinger },
-                    color = Color.White.copy(alpha = 0.72f),
-                    fontSize = tv.tvFont(14),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (isCurrent) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(tv.tvSize(9))
+                            .background(colors.selectGreen, CircleShape)
+                            .padding(horizontal = tv.tvSize(7), vertical = tv.tvSize(6)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        PlayingBars(color = colors.bgDeep)
+                    }
+                }
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(horizontal = tv.tvSize(11), vertical = tv.tvSize(10)),
+                ) {
+                    Text(
+                        text = item.name,
+                        color = Color.White,
+                        fontSize = tv.tvFont(17),
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = item.singer.ifBlank { TvText.unknownSinger },
+                        color = Color.White.copy(alpha = 0.72f),
+                        fontSize = tv.tvFont(14),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LocalFolderCard(
     folder: LocalFolder,
@@ -3362,52 +3955,45 @@ private fun LocalFolderCard(
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    Column(
+    val shape = RoundedCornerShape(tv.tvSize(12))
+    TvButtonSurface(
         modifier = Modifier
             .width(tv.tvSize(166))
-            .onFocusChanged { focused = it.isFocused }
-            .combinedClickable(onClick = onOpen, onLongClick = onManage)
-            .onKeyEvent { event ->
+            .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyUp && event.key == Key.Menu) {
                     onManage()
                     true
                 } else {
                     false
                 }
-            }
-            .background(
-                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
-                RoundedCornerShape(tv.tvSize(12)),
+            },
+        shape = shape,
+        onClick = onOpen,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Column(modifier = Modifier.padding(tv.tvSize(8))) {
+            HomeCover(
+                url = folder.cover ?: folder.songs.firstOrNull()?.img,
+                size = tv.tvSize(146),
+                corner = 10,
             )
-            .border(
-                width = if (focused) 3.dp else 0.dp,
-                color = colors.selectGreen,
-                shape = RoundedCornerShape(tv.tvSize(12)),
+            Spacer(Modifier.height(tv.tvSize(6)))
+            Text(
+                text = folder.name,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(18),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            .padding(tv.tvSize(8)),
-    ) {
-        HomeCover(
-            url = folder.cover ?: folder.songs.firstOrNull()?.img,
-            size = tv.tvSize(146),
-            corner = 10,
-        )
-        Spacer(Modifier.height(tv.tvSize(6)))
-        Text(
-            text = folder.name,
-            color = colors.text,
-            fontSize = tv.tvFont(18),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = "${folder.songs.size} 首 · MENU 管理",
-            color = colors.dimText,
-            fontSize = tv.tvFont(14),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+            Text(
+                text = "${folder.songs.size} 首 · MENU 管理",
+                color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                fontSize = tv.tvFont(14),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -3415,47 +4001,39 @@ private fun LocalFolderCard(
 private fun AddFolderCard(onClick: () -> Unit) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    Column(
-        modifier = Modifier
-            .width(tv.tvSize(166))
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(
-                if (focused) colors.selectGreen.copy(alpha = 0.16f) else colors.surface,
-                RoundedCornerShape(tv.tvSize(12)),
-            )
-            .border(
-                width = if (focused) 3.dp else 2.dp,
-                color = if (focused) colors.selectGreen else colors.border,
-                shape = RoundedCornerShape(tv.tvSize(12)),
-            )
-            .padding(tv.tvSize(8)),
-    ) {
-        Box(
-            modifier = Modifier.size(tv.tvSize(146)),
-            contentAlignment = Alignment.Center,
-        ) {
+    val shape = RoundedCornerShape(tv.tvSize(12))
+    TvButtonSurface(
+        modifier = Modifier.width(tv.tvSize(166)),
+        shape = shape,
+        onClick = onClick,
+        contentAlignment = Alignment.CenterStart,
+    ) { focused ->
+        Column(modifier = Modifier.padding(tv.tvSize(8))) {
+            Box(
+                modifier = Modifier.size(tv.tvSize(146)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "+",
+                    color = if (focused) Color.White else colors.dimText,
+                    fontSize = tv.tvFont(54),
+                )
+            }
+            Spacer(Modifier.height(tv.tvSize(6)))
             Text(
-                text = "+",
-                color = if (focused) colors.selectGreen else colors.dimText,
-                fontSize = tv.tvFont(54),
+                text = TvText.addLocalSongDisk,
+                color = if (focused) Color.White else colors.text,
+                fontSize = tv.tvFont(18),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "电视或 U 盘目录",
+                color = if (focused) Color.White.copy(alpha = 0.76f) else colors.dimText,
+                fontSize = tv.tvFont(14),
             )
         }
-        Spacer(Modifier.height(tv.tvSize(6)))
-        Text(
-            text = TvText.addLocalSongDisk,
-            color = colors.text,
-            fontSize = tv.tvFont(18),
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = "电视或 U 盘目录",
-            color = colors.dimText,
-            fontSize = tv.tvFont(14),
-        )
     }
 }
 
@@ -3717,16 +4295,25 @@ private fun PlaylistActionDialog(
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val firstRequester = remember { FocusRequester() }
+    var interactionReady by remember(playlist.id) { mutableStateOf(false) }
 
     LaunchedEffect(playlist.id) {
+        // 屏蔽长按松手后残留的 OK/BACK，避免弹窗刚出现就被关闭或误触第一项。
+        delay(320)
+        interactionReady = true
         withFrameNanos { }
         withFrameNanos { }
         runCatching { firstRequester.requestFocus() }
     }
 
     Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        onDismissRequest = {
+            if (interactionReady) onDismiss()
+        },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false,
+        ),
     ) {
         Box(
             modifier = Modifier.fillMaxSize().background(colors.overlay),
@@ -3781,16 +4368,25 @@ private fun ConfirmActionDialog(
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     val cancelRequester = remember { FocusRequester() }
+    var interactionReady by remember(title, message) { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(title, message) {
+        // 长按打开确认框时，忽略松手后尾随的 OK/BACK，避免弹窗瞬间消失。
+        delay(320)
+        interactionReady = true
         withFrameNanos { }
         withFrameNanos { }
         runCatching { cancelRequester.requestFocus() }
     }
 
     Dialog(
-        onDismissRequest = onCancel,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        onDismissRequest = {
+            if (interactionReady) onCancel()
+        },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false,
+        ),
     ) {
         Box(
             modifier = Modifier.fillMaxSize().background(colors.overlay),
@@ -4103,8 +4699,8 @@ private fun SettingActionButton(label: String, onClick: () -> Unit) {
 
 
 /**
- * 搜索页：顶部搜索栏 + 搜索发现 / 大尺寸结果列表 + 按需展开的电视键盘。
- * 按 OK/下键进入内容区时聚焦搜索框；键盘只在需要输入时占用屏幕空间。
+ * 搜索页：顶部搜索栏 + 搜索发现 / 大尺寸结果列表。
+ * 按 OK/下键进入内容区时聚焦搜索框，输入交给电视当前启用的系统输入法。
  */
 @Composable
 fun SearchScreen(
@@ -4115,8 +4711,8 @@ fun SearchScreen(
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
     var text by rememberSaveable { mutableStateOf(String()) }
-    var keyboardVisible by rememberSaveable { mutableStateOf(false) }
     var focusResultsAfterSearch by remember { mutableStateOf(false) }
+    val keyboard = LocalSoftwareKeyboardController.current
 
     val results by vm.tvSearchResults.collectAsState()
     val pageInfo by vm.tvSearchPage.collectAsState()
@@ -4128,7 +4724,6 @@ fun SearchScreen(
     val current by vm.current.collectAsState()
 
     val searchFieldFocus = remember { FocusRequester() }
-    val firstKeyFocus = remember { FocusRequester() }
     val firstResultFocus = remember { FocusRequester() }
 
     val hotWords = remember {
@@ -4144,11 +4739,12 @@ fun SearchScreen(
     fun submit(keyword: String = text) {
         val query = keyword.trim()
         if (query.isBlank()) {
-            keyboardVisible = true
+            runCatching { searchFieldFocus.requestFocus() }
+            keyboard?.show()
             return
         }
         text = query
-        keyboardVisible = false
+        keyboard?.hide()
         focusResultsAfterSearch = true
         vm.searchTv(query, 1)
     }
@@ -4163,12 +4759,6 @@ fun SearchScreen(
     LaunchedEffect(activeQuery) {
         if (activeQuery.isNotBlank() && text.isBlank()) text = activeQuery
     }
-    LaunchedEffect(keyboardVisible) {
-        if (!keyboardVisible) return@LaunchedEffect
-        withFrameNanos { }
-        withFrameNanos { }
-        runCatching { firstKeyFocus.requestFocus() }
-    }
     LaunchedEffect(focusResultsAfterSearch, loading, results.size) {
         if (!focusResultsAfterSearch || loading) return@LaunchedEffect
         withFrameNanos { }
@@ -4179,11 +4769,6 @@ fun SearchScreen(
             runCatching { searchFieldFocus.requestFocus() }
         }
         focusResultsAfterSearch = false
-    }
-
-    BackHandler(enabled = keyboardVisible) {
-        keyboardVisible = false
-        runCatching { searchFieldFocus.requestFocus() }
     }
 
     val showingResults = activeQuery.isNotBlank() || loading || results.isNotEmpty() || error != null
@@ -4231,7 +4816,7 @@ fun SearchScreen(
             if (activeQuery.isNotBlank()) {
                 SearchTextAction(TvText.clear) {
                     text = String()
-                    keyboardVisible = false
+                    keyboard?.hide()
                     vm.clearTvSearch()
                     runCatching { searchFieldFocus.requestFocus() }
                 }
@@ -4240,8 +4825,8 @@ fun SearchScreen(
         Spacer(Modifier.height(tv.tvSize(14)))
         SearchInputBar(
             text = text,
+            onTextChange = { text = it },
             focusRequester = searchFieldFocus,
-            onEdit = { keyboardVisible = true },
             onSubmit = { submit() },
             onFocusNav = onFocusNav,
         )
@@ -4279,35 +4864,27 @@ fun SearchScreen(
                 modifier = Modifier.weight(1f),
             )
         }
-
-        if (keyboardVisible) {
-            Spacer(Modifier.height(tv.tvSize(12)))
-            SearchKeyboardPanel(
-                firstKeyFocus = firstKeyFocus,
-                onKey = { text += it },
-                onBackspace = { if (text.isNotEmpty()) text = text.dropLast(1) },
-                onClear = {
-                    text = String()
-                    vm.clearTvSearch()
-                },
-                onSubmit = { submit() },
-            )
-        }
     }
 }
 
 @Composable
 private fun SearchInputBar(
     text: String,
+    onTextChange: (String) -> Unit,
     focusRequester: FocusRequester,
-    onEdit: () -> Unit,
     onSubmit: () -> Unit,
     onFocusNav: () -> Unit,
 ) {
     val colors = LocalTvColors.current
     val tv = LocalTvMetrics.current
+    val keyboard = LocalSoftwareKeyboardController.current
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(tv.tvSize(16))
+
+    fun submitFromKeyboard() {
+        keyboard?.hide()
+        onSubmit()
+    }
 
     Row(
         modifier = Modifier
@@ -4323,45 +4900,78 @@ private fun SearchInputBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(tv.tvSize(14)),
     ) {
-        Row(
+        BasicTextField(
+            value = text,
+            onValueChange = onTextChange,
+            singleLine = true,
+            textStyle = TextStyle(color = colors.text, fontSize = tv.tvFont(23)),
+            cursorBrush = SolidColor(colors.selectGreen),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = { submitFromKeyboard() },
+                onDone = { submitFromKeyboard() },
+            ),
             modifier = Modifier
                 .weight(1f)
                 .height(tv.tvSize(68))
                 .focusRequester(focusRequester)
                 .onFocusChanged { focused = it.isFocused }
-                .clickable { onEdit() }
+                .onPreviewKeyEvent { event ->
+                    when {
+                        event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp -> {
+                            onFocusNav()
+                            true
+                        }
+                        event.type == KeyEventType.KeyDown &&
+                            (event.key == Key.DirectionCenter || event.key == Key.Enter) -> {
+                            keyboard?.show()
+                            true
+                        }
+                        else -> false
+                    }
+                }
                 .background(if (focused) colors.selectGreen.copy(alpha = 0.12f) else colors.surface, shape)
                 .border(
                     width = if (focused) 2.dp else 1.dp,
                     color = if (focused) colors.selectGreen else colors.border,
                     shape = shape,
-                )
-                .padding(horizontal = tv.tvSize(22)),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Search,
-                contentDescription = null,
-                tint = if (focused) colors.selectGreen else colors.subtext,
-                modifier = Modifier.size(tv.tvSize(28)),
-            )
-            Spacer(Modifier.width(tv.tvSize(14)))
-            Text(
-                text = text.ifBlank { TvText.searchPlaceholder },
-                color = if (text.isBlank()) colors.dimText else colors.text,
-                fontSize = tv.tvFont(23),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = TvText.searchInputHint,
-                color = colors.dimText,
-                fontSize = tv.tvFont(14),
-                maxLines = 1,
-            )
-        }
-        SettingActionButton(TvText.search) { onSubmit() }
+                ),
+            decorationBox = { innerTextField ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = tv.tvSize(22)),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = if (focused) colors.selectGreen else colors.subtext,
+                        modifier = Modifier.size(tv.tvSize(28)),
+                    )
+                    Spacer(Modifier.width(tv.tvSize(14)))
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (text.isBlank()) {
+                            Text(
+                                text = TvText.searchPlaceholder,
+                                color = colors.dimText,
+                                fontSize = tv.tvFont(23),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        innerTextField()
+                    }
+                    Text(
+                        text = TvText.searchInputHint,
+                        color = colors.dimText,
+                        fontSize = tv.tvFont(14),
+                        maxLines = 1,
+                    )
+                }
+            },
+        )
+        SettingActionButton(TvText.search) { submitFromKeyboard() }
     }
 }
 
@@ -4928,124 +5538,6 @@ private fun SearchDiscoveryButton(
                 modifier = Modifier.weight(1f),
             )
         }
-    }
-}
-
-private val SEARCH_KEYBOARD_ROWS = listOf(
-    listOf('Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'),
-    listOf('A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'),
-    listOf('Z', 'X', 'C', 'V', 'B', 'N', 'M'),
-)
-
-@Composable
-private fun SearchKeyboardPanel(
-    firstKeyFocus: FocusRequester,
-    onKey: (Char) -> Unit,
-    onBackspace: () -> Unit,
-    onClear: () -> Unit,
-    onSubmit: () -> Unit,
-) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    val shape = RoundedCornerShape(tv.tvSize(18))
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(colors.surface, shape)
-            .border(1.dp, colors.line, shape)
-            .padding(horizontal = tv.tvSize(18), vertical = tv.tvSize(12)),
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth(0.88f).align(Alignment.Center),
-            verticalArrangement = Arrangement.spacedBy(tv.tvSize(7)),
-        ) {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = TvText.tvKeyboard,
-                    color = colors.subtext,
-                    fontSize = tv.tvFont(15),
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "按返回键收起",
-                    color = colors.dimText,
-                    fontSize = tv.tvFont(13),
-                )
-            }
-            SEARCH_KEYBOARD_ROWS.forEachIndexed { rowIndex, row ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
-                ) {
-                    row.forEachIndexed { index, char ->
-                        SearchKeyboardKey(
-                            label = char.toString(),
-                            modifier = Modifier.weight(1f),
-                            focusRequester = if (rowIndex == 0 && index == 0) firstKeyFocus else null,
-                            onClick = { onKey(char) },
-                        )
-                    }
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(tv.tvSize(8)),
-            ) {
-                SearchKeyboardKey(
-                    label = TvText.space,
-                    modifier = Modifier.weight(1.3f),
-                    onClick = { onKey(' ') },
-                )
-                SearchKeyboardKey(
-                    label = TvText.backspace,
-                    modifier = Modifier.weight(1f),
-                    onClick = onBackspace,
-                )
-                SearchKeyboardKey(
-                    label = TvText.clear,
-                    modifier = Modifier.weight(1f),
-                    onClick = onClear,
-                )
-                SearchKeyboardKey(
-                    label = TvText.search,
-                    modifier = Modifier.weight(1.3f),
-                    onClick = onSubmit,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SearchKeyboardKey(
-    label: String,
-    modifier: Modifier = Modifier,
-    focusRequester: FocusRequester? = null,
-    onClick: () -> Unit,
-) {
-    val colors = LocalTvColors.current
-    val tv = LocalTvMetrics.current
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(tv.tvSize(8))
-    Box(
-        modifier = modifier
-            .height(tv.tvSize(36))
-            .let { base ->
-                if (focusRequester != null) base.focusRequester(focusRequester) else base
-            }
-            .onFocusChanged { focused = it.isFocused }
-            .clickable { onClick() }
-            .background(if (focused) colors.selectGreen else colors.surfaceHigh, shape)
-            .border(if (focused) 2.dp else 0.dp, colors.focus, shape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = if (focused) Color.White else colors.subtext,
-            fontSize = tv.tvFont(16),
-            fontWeight = FontWeight.Bold,
-        )
     }
 }
 

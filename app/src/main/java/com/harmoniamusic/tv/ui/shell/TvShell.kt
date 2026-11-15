@@ -34,6 +34,7 @@ import com.harmoniamusic.tv.ui.components.TvButtonSize
 import com.harmoniamusic.tv.ui.components.TvButtonTone
 import com.harmoniamusic.tv.ui.screens.ChartsScreen
 import com.harmoniamusic.tv.ui.screens.HomeScreen
+import com.harmoniamusic.tv.ui.screens.MyListDetail
 import com.harmoniamusic.tv.ui.screens.MyListScreen
 import com.harmoniamusic.tv.ui.screens.PlayerScreen
 import com.harmoniamusic.tv.ui.screens.SearchScreen
@@ -64,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 @Composable
 fun TvShell() {
     var selectedTab by remember { mutableStateOf(TvTab.HOME) }
+    var myListDetail by remember { mutableStateOf<MyListDetail?>(null) }
     var showPlayer by remember { mutableStateOf(false) }
     var showDownload by remember { mutableStateOf(false) }
     val vm: PlayerViewModel = viewModel()
@@ -172,7 +174,15 @@ fun TvShell() {
                             focusRequestId = focusRequestFor(TvTab.NEW),
                             onFocusNav = { focusTopNav() },
                         )
-                        TvTab.MYLIST -> MyListScreen(onFocusNav = { focusTopNav() })
+                        TvTab.MYLIST -> MyListScreen(
+                            detail = myListDetail,
+                            onDetailChange = { myListDetail = it },
+                            onOpenSearch = {
+                                selectedTab = TvTab.SEARCH
+                                requestContentFocus(TvTab.SEARCH)
+                            },
+                            onFocusNav = { focusTopNav() },
+                        )
                         TvTab.SEARCH -> SearchScreen(
                             focusRequestId = focusRequestFor(TvTab.SEARCH),
                             onFocusNav = { focusTopNav() },
